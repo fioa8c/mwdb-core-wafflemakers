@@ -15,6 +15,10 @@ ENV UV_PYTHON_DOWNLOADS=0
 # No hardlinks supported
 ENV UV_LINK_MODE=copy
 
+# Build toolchain for C/C++ extensions compiled from source by uv sync
+# (py-tlsh has no musl wheels on PyPI).
+RUN apk add --no-cache g++ musl-dev python3-dev
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
