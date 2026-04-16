@@ -14,7 +14,14 @@ from werkzeug.utils import secure_filename
 from mwdb.core.auth import AuthScope, generate_token, verify_token
 from mwdb.core.config import StorageProviderType, app_config
 from mwdb.core.karton import send_file_to_karton
-from mwdb.core.util import calc_crc32, calc_hash, calc_magic, calc_ssdeep, get_s3_client
+from mwdb.core.util import (
+    calc_crc32,
+    calc_hash,
+    calc_magic,
+    calc_ssdeep,
+    calc_tlsh,
+    get_s3_client,
+)
 from mwdb.core.zip_stream import zip_stream
 
 from . import db
@@ -35,6 +42,7 @@ class File(Object):
     sha256 = db.Column(db.String(64, collation="C"), index=True, unique=True)
     sha512 = db.Column(db.String(128, collation="C"), index=True)
     ssdeep = db.Column(db.String(255, collation="C"), index=True)
+    tlsh = db.Column(db.String(72, collation="C"), index=True)
     alt_names = db.Column(
         MutableList.as_mutable(ARRAY(db.String(collation="C"))),
         nullable=False,
@@ -102,6 +110,7 @@ class File(Object):
             sha256=sha256,
             sha512=calc_hash(file_stream, hashlib.sha512(), lambda h: h.hexdigest()),
             ssdeep=calc_ssdeep(file_stream),
+            tlsh=calc_tlsh(file_stream),
             share_3rd_party=share_3rd_party,
         )
 
