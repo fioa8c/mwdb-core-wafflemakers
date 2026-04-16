@@ -70,6 +70,7 @@ field_mapping: Dict[str, Dict[str, BaseField]] = {
         "sha256": StringField(File.sha256),
         "sha512": StringField(File.sha512),
         "ssdeep": StringField(File.ssdeep),
+        "tlsh": StringField(File.tlsh),
         "crc32": StringField(File.crc32),
         "multi": MultiFileField(),
     },
