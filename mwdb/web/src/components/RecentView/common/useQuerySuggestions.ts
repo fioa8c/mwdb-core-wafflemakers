@@ -107,6 +107,9 @@ const fieldDefinitions: Record<
         ssdeep: {
             description: "Query for file having a provided ssdeep hash",
         },
+        tlsh: {
+            description: "Query for file having a provided TLSH hash",
+        },
         crc32: {
             description: "Query for file having a provided crc32 hash",
         },
