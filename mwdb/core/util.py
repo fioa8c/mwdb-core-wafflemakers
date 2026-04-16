@@ -24,6 +24,7 @@ from botocore.credentials import (
 
 from .config import app_config
 from .ssdeep import SsdeepHash
+from .tlsh import calc_tlsh as calc_tlsh
 
 
 def config_dhash(obj):
