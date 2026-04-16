@@ -122,6 +122,7 @@ export type ObjectData = ObjectCommonData & {
     sha256: string;
     sha512: string;
     ssdeep: string;
+    tlsh: string | null;
     type: "file";
 };
 
