@@ -278,3 +278,17 @@ def test_user_delete(admin_session):
     assert len(comments) == 1
     assert comments[0]["comment"] == "random comment"
     assert comments[0]["author"] is None
+
+
+def test_tlsh_computed_on_upload(admin_session):
+    # > 512 bytes of varied content so TLSH can produce a hash
+    content = ("A" * 256 + "B" * 256 + rand_string(512))
+    sample = admin_session.add_sample(rand_string(), content)
+    assert sample["tlsh"] is not None
+    assert sample["tlsh"].startswith("T1")
+    assert len(sample["tlsh"]) == 72
+
+
+def test_tlsh_skipped_for_tiny_file(admin_session):
+    sample = admin_session.add_sample(rand_string(), "short")
+    assert sample["tlsh"] is None

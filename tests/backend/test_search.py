@@ -705,3 +705,16 @@ def test_search_multi(admin_session):
     wildcard_hash = samples[0].get("sha512")[:-100] + "*"
     with ShouldRaise(status_code=400):
         found_objs = test.search(f'file.multi:"{wildcard_hash}"')
+
+
+def test_search_by_tlsh(admin_session):
+    test = admin_session
+
+    content = ("A" * 256 + "B" * 256 + rand_string(512))
+    sample = test.add_sample(rand_string(), content)
+    assert sample["tlsh"] is not None  # preconditional — if tlsh failed, so will search
+
+    found_objs = test.search(f'file.tlsh:{sample["tlsh"]}')
+
+    assert len(found_objs) > 0
+    assert any(obj["id"] == sample["id"] for obj in found_objs)
