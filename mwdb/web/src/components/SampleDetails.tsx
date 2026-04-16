@@ -195,6 +195,32 @@ export function SampleDetails() {
                         </span>
                     </td>
                 </tr>
+                <tr className="flickerable">
+                    <th>tlsh</th>
+                    <td id="tlsh" className="text-monospace">
+                        {object.tlsh ? (
+                            <>
+                                <Link
+                                    to={makeSearchLink({
+                                        field: "tlsh",
+                                        value: object.tlsh,
+                                        pathname: `${remotePath}/`,
+                                    })}
+                                >
+                                    {object.tlsh}
+                                </Link>
+                                <span className="ml-2">
+                                    <ActionCopyToClipboard
+                                        text={object.tlsh}
+                                        tooltipMessage="Copy tlsh to clipboard"
+                                    />
+                                </span>
+                            </>
+                        ) : (
+                            <span className="text-muted">not computed</span>
+                        )}
+                    </td>
+                </tr>
                 <tr>
                     <th>Upload time</th>
                     <td id="upload_time">
