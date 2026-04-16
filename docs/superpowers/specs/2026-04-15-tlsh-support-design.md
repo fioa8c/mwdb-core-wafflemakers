@@ -13,7 +13,7 @@ Compute, persist, and expose the **TLSH** (Trend Micro Locality Sensitive Hash) 
 
 ### In scope
 
-- Compute TLSH on file upload and persist it in a new indexed column on the `file` table.
+- Compute TLSH on file upload and persist it in a new indexed column on the `object` table (the physical table shared by `File`/`Config`/`TextBlob` since migration `6db157d09a30` merged them via single-table inheritance — the `File.tlsh` class attribute resolves to `object.tlsh`).
 - Expose `tlsh` in the file detail API response.
 - Make `tlsh:<value>` searchable via the existing Luqum-based search grammar as an exact-match `StringField`.
 - Render the hash on the sample details page in the SPA, with a "not computed" fallback for files too small/low-entropy for TLSH.
@@ -200,15 +200,15 @@ depends_on = None
 
 def upgrade():
     op.add_column(
-        "file",
+        "object",
         sa.Column("tlsh", sa.String(length=72, collation="C"), nullable=True),
     )
-    op.create_index("ix_file_tlsh", "file", ["tlsh"], unique=False)
+    op.create_index("ix_object_tlsh", "object", ["tlsh"], unique=False)
 
 
 def downgrade():
-    op.drop_index("ix_file_tlsh", table_name="file")
-    op.drop_column("file", "tlsh")
+    op.drop_index("ix_object_tlsh", table_name="object")
+    op.drop_column("object", "tlsh")
 ```
 
 Existing rows receive `NULL` for `tlsh`. No backfill. Phase 2 (the jetpack-library importer) will populate TLSH naturally for the files it uploads; any pre-existing files stay null unless re-uploaded.
@@ -239,7 +239,7 @@ Add to the `File.__name__` dict, adjacent to the existing `ssdeep` entry (curren
 "tlsh": StringField(File.tlsh),    # new
 ```
 
-`StringField` handles both exact-equality (`tlsh:T1ABC…`) and Luqum wildcard patterns (`tlsh:T1ABC*`). Exact equality hits the `ix_file_tlsh` index. Wildcard patterns fall back to `LIKE`; leading-anchor patterns still use the index, unanchored patterns degrade to a sequential scan — acceptable given the expected workload is full-hash pastes from the jetpack-library phase 2 ingestion.
+`StringField` handles both exact-equality (`tlsh:T1ABC…`) and Luqum wildcard patterns (`tlsh:T1ABC*`). Exact equality hits the `ix_object_tlsh` index. Wildcard patterns fall back to `LIKE`; leading-anchor patterns still use the index, unanchored patterns degrade to a sequential scan — acceptable given the expected workload is full-hash pastes from the jetpack-library phase 2 ingestion.
 
 ## 7. Frontend
 
