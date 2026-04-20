@@ -9,6 +9,7 @@ from mwdb.core.config import app_config
 from .base import AppDefaultGroup, CustomFlaskGroup, create_app, logger
 from .configuration import create_configuration
 from .database import configure_database
+from .import_threat_library import import_jetpack_threat_library
 
 
 @click.group(cls=CustomFlaskGroup, create_app=create_app, add_version_option=False)
@@ -149,3 +150,6 @@ def set_admin_password(password):
     admin.set_password(password)
     db.session.add(admin)
     db.session.commit()
+
+
+cli.add_command(import_jetpack_threat_library)
