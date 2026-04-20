@@ -8,16 +8,24 @@ import { ObjectAction, ObjectTab, ObjectPreview } from "@mwdb-web/commons/ui";
 import { useRemotePath } from "@mwdb-web/commons/remotes";
 import { BlobData } from "@mwdb-web/types/types";
 
+type AnalysisBlobs = {
+    normalized: BlobData | null;
+    evalhook: BlobData | null;
+};
+
 export function NormalizedCodeTab() {
     const api = useContext(APIContext);
     const context = useContext(ObjectContext);
     const remotePath = useRemotePath();
-    const [blob, setBlob] = useState<BlobData | null>(null);
+    const [blobs, setBlobs] = useState<AnalysisBlobs>({
+        normalized: null,
+        evalhook: null,
+    });
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         let cancelled = false;
-        async function fetchNormalizedBlob() {
+        async function fetchAnalysisBlobs() {
             if (!context.object?.id) return;
             try {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,59 +33,113 @@ export function NormalizedCodeTab() {
                     context.object.id as any
                 );
                 const children = relationsResp.data.children || [];
-                const blobChild = children.find(
+                const blobChildren = children.filter(
                     (c: { type: string }) => c.type === "text_blob"
                 );
-                if (!blobChild) {
-                    if (!cancelled) setLoading(false);
-                    return;
+
+                const result: AnalysisBlobs = {
+                    normalized: null,
+                    evalhook: null,
+                };
+                for (const child of blobChildren) {
+                    const blobResp = await api.getObject("blob", child.id);
+                    const blobData = blobResp.data as BlobData;
+                    if (blobData.blob_type === "normalized-php") {
+                        result.normalized = blobData;
+                    } else if (blobData.blob_type === "evalhook-output") {
+                        result.evalhook = blobData;
+                    }
                 }
-                const blobResp = await api.getObject("blob", blobChild.id);
-                const blobData = blobResp.data as BlobData;
-                if (blobData.blob_type === "normalized-php" && !cancelled) {
-                    setBlob(blobData);
-                }
+                if (!cancelled) setBlobs(result);
             } catch {
-                // Relations or blob fetch failed — silently hide the tab
+                // silently hide tab on error
             }
             if (!cancelled) setLoading(false);
         }
-        fetchNormalizedBlob();
+        fetchAnalysisBlobs();
         return () => {
             cancelled = true;
         };
     }, [context.object?.id, api]);
 
-    if (loading || !blob) return <></>;
+    if (loading || (!blobs.normalized && !blobs.evalhook)) return <></>;
 
     return (
         <ObjectTab
             tab="normalized"
             icon={faCode}
-            label="Normalized PHP"
+            label="Analysis"
             actions={[
-                <ObjectAction
-                    label="Go to blob"
-                    link={`${remotePath}/blob/${blob.id}`}
-                />,
+                ...(blobs.normalized
+                    ? [
+                          <ObjectAction
+                              key="normalized"
+                              label="Normalized blob"
+                              link={`${remotePath}/blob/${blobs.normalized.id}`}
+                          />,
+                      ]
+                    : []),
+                ...(blobs.evalhook
+                    ? [
+                          <ObjectAction
+                              key="evalhook"
+                              label="Eval hook blob"
+                              link={`${remotePath}/blob/${blobs.evalhook.id}`}
+                          />,
+                      ]
+                    : []),
             ]}
             component={() => (
                 <div>
-                    <div className="mb-2">
-                        <small className="text-muted">
-                            Deobfuscated/normalized version of this file (stored
-                            as{" "}
-                            <Link to={`${remotePath}/blob/${blob.id}`}>
-                                TextBlob
-                            </Link>
-                            )
-                        </small>
-                    </div>
-                    <ObjectPreview
-                        content={blob.content}
-                        mode="raw"
-                        showInvisibles
-                    />
+                    {blobs.normalized && (
+                        <div className="mb-4">
+                            <h6>
+                                Normalized PHP{" "}
+                                <small className="text-muted">
+                                    (
+                                    <Link
+                                        to={`${remotePath}/blob/${blobs.normalized.id}`}
+                                    >
+                                        TextBlob
+                                    </Link>
+                                    )
+                                </small>
+                            </h6>
+                            <p className="text-muted small mb-2">
+                                AST-based deobfuscation with variable resolution
+                            </p>
+                            <ObjectPreview
+                                content={blobs.normalized.content}
+                                mode="raw"
+                                showInvisibles
+                            />
+                        </div>
+                    )}
+                    {blobs.evalhook && (
+                        <div className="mb-4">
+                            <h6>
+                                Eval Hook Output{" "}
+                                <small className="text-muted">
+                                    (
+                                    <Link
+                                        to={`${remotePath}/blob/${blobs.evalhook.id}`}
+                                    >
+                                        TextBlob
+                                    </Link>
+                                    )
+                                </small>
+                            </h6>
+                            <p className="text-muted small mb-2">
+                                Decoded payload captured by intercepting eval()
+                                calls
+                            </p>
+                            <ObjectPreview
+                                content={blobs.evalhook.content}
+                                mode="raw"
+                                showInvisibles
+                            />
+                        </div>
+                    )}
                 </div>
             )}
         />

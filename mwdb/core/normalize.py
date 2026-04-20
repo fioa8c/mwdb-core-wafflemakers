@@ -35,6 +35,21 @@ def normalize_via_sandbox(sandbox_url, php_code):
     return None
 
 
+def analyze_via_sandbox(sandbox_url, php_code):
+    try:
+        r = requests.post(
+            f"{sandbox_url}/analyze.php",
+            data={"phpCode": php_code},
+            timeout=60,
+        )
+        if r.ok and r.text.strip():
+            return r.text.strip()
+    except requests.RequestException:
+        pass
+
+    return None
+
+
 def ensure_normalized_tlsh_definition():
     from mwdb.model import db
     from mwdb.model.attribute import AttributeDefinition

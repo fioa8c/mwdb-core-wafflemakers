@@ -6,7 +6,11 @@ import click
 from flask import g
 from flask.cli import with_appcontext
 
-from mwdb.core.normalize import ensure_normalized_tlsh_definition, normalize_via_sandbox
+from mwdb.core.normalize import (
+    analyze_via_sandbox,
+    ensure_normalized_tlsh_definition,
+    normalize_via_sandbox,
+)
 from mwdb.core.tlsh import calc_tlsh
 
 PHP_EXTENSIONS = {".php", ".phtml", ".php5", ".php7", ".inc"}
@@ -101,15 +105,29 @@ def normalize_php(sandbox_url):
                     check_permissions=False,
                 )
 
+            evalhook_ran = False
+            if "eval(" in php_code:
+                evalhook_output = analyze_via_sandbox(sandbox_url, php_code)
+                if evalhook_output:
+                    TextBlob.get_or_create(
+                        content=evalhook_output,
+                        blob_name=f"{file_obj.file_name}.evalhook",
+                        blob_type="evalhook-output",
+                        share_3rd_party=False,
+                        parent=file_obj,
+                    )
+                    evalhook_ran = True
+
             db.session.commit()
 
             if hasattr(g, "scheduled_hooks"):
                 g.scheduled_hooks = []
 
             tlsh_display = tlsh_hash or "n/a"
+            evalhook_display = " +evalhook" if evalhook_ran else ""
             click.echo(
                 f"[{i}/{total}] Normalized {file_obj.file_name} "
-                f"(normalized_tlsh: {tlsh_display})"
+                f"(normalized_tlsh: {tlsh_display}{evalhook_display})"
             )
             processed += 1
 

@@ -3,7 +3,7 @@ import os
 
 from mwdb.core.hooks import HookHandler
 from mwdb.core.log import getLogger
-from mwdb.core.normalize import normalize_via_sandbox
+from mwdb.core.normalize import analyze_via_sandbox, normalize_via_sandbox
 from mwdb.core.tlsh import calc_tlsh
 
 logger = getLogger()
@@ -51,6 +51,17 @@ class NormalizePhpHookHandler(HookHandler):
                     commit=False,
                     check_permissions=False,
                 )
+
+            if "eval(" in php_code:
+                evalhook_output = analyze_via_sandbox(sandbox_url.rstrip("/"), php_code)
+                if evalhook_output:
+                    TextBlob.get_or_create(
+                        content=evalhook_output,
+                        blob_name=f"{file.file_name}.evalhook",
+                        blob_type="evalhook-output",
+                        share_3rd_party=False,
+                        parent=file,
+                    )
 
             db.session.commit()
             logger.info(
