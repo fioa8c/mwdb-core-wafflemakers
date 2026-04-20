@@ -5,6 +5,7 @@ import {
     ShowObject,
     ObjectTab,
     LatestConfigTab,
+    NormalizedCodeTab,
     RelationsTab,
     DownloadAction,
     ZipAction,
@@ -89,6 +90,7 @@ export function ShowSampleView() {
                 />
             </Extendable>
             <LatestConfigTab label="Static config" />
+            <NormalizedCodeTab />
         </ShowObject>
     );
 }

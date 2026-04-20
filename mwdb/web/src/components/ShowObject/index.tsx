@@ -2,6 +2,7 @@ export { ShowObject } from "./common/ShowObject";
 
 export { RelationsTab } from "./common/RelationsTab";
 export { LatestConfigTab } from "./common/LatestConfigTab";
+export { NormalizedCodeTab } from "./common/NormalizedCodeTab";
 
 export { DownloadAction } from "./Actions/DownloadAction";
 export { ZipAction } from "./Actions/ZipAction";
