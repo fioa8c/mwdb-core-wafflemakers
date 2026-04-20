@@ -1,0 +1,66 @@
+services:
+  traefik:
+    image: traefik:v3.4
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "letsencrypt:/letsencrypt"
+    restart: unless-stopped
+
+  mwdb:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    env_file:
+      - mwdb-vars.env
+    environment:
+      - GUNICORN_WORKERS=2
+    volumes:
+      - mwdb-uploads:/app/uploads
+
+  mwdb-web:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile-web
+    depends_on:
+      - mwdb
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mwdb.rule=Host(`${MWDB_DOMAIN}`)"
+      - "traefik.http.routers.mwdb.entrypoints=websecure"
+      - "traefik.http.routers.mwdb.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mwdb.loadbalancer.server.port=80"
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    env_file:
+      - postgres-vars.env
+    volumes:
+      - mwdb-postgres:/var/lib/postgresql/data
+    shm_size: 256m
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+
+volumes:
+  mwdb-postgres:
+  mwdb-uploads:
+  letsencrypt:
