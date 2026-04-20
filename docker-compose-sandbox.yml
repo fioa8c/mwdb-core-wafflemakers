@@ -1,0 +1,11 @@
+services:
+  sandbox:
+    build:
+      context: ../waffle-makers-tooling/security-research-malware-sandbox
+    environment:
+      - PHP_MEMORY_LIMIT=512M
+      - PHP_MAX_EXECUTION_TIME=300
+      - PHP_UPLOAD_MAX_FILESIZE=50M
+      - PHP_POST_MAX_SIZE=50M
+    volumes:
+      - ./docker/sandbox/htaccess-override:/var/www/html/.htaccess:ro

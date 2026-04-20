@@ -1,0 +1,4 @@
+# Minimal .htaccess for API-only sandbox access (no RewriteEngine)
+DirectoryIndex index.html
+Options -Indexes
+ServerSignature Off
