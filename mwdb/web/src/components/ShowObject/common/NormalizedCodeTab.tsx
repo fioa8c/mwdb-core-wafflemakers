@@ -111,6 +111,7 @@ export function NormalizedCodeTab() {
                             <ObjectPreview
                                 content={blobs.normalized.content}
                                 mode="raw"
+                                language="php"
                                 showInvisibles
                             />
                         </div>
@@ -136,6 +137,13 @@ export function NormalizedCodeTab() {
                             <ObjectPreview
                                 content={blobs.evalhook.content}
                                 mode="raw"
+                                language={
+                                    blobs.evalhook.content
+                                        .trimStart()
+                                        .startsWith("<")
+                                        ? "html"
+                                        : "php"
+                                }
                                 showInvisibles
                             />
                         </div>

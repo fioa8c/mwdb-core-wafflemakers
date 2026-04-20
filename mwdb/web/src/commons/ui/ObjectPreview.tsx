@@ -9,6 +9,8 @@ import {
 
 import "ace-builds/src-noconflict/mode-text";
 import "ace-builds/src-noconflict/mode-json";
+import "ace-builds/src-noconflict/mode-php";
+import "ace-builds/src-noconflict/mode-html";
 import "ace-builds/src-noconflict/theme-github";
 import "ace-builds/src-noconflict/ext-searchbox";
 
@@ -55,6 +57,7 @@ type Props = {
     mode: string;
     showInvisibles: boolean;
     json?: boolean;
+    language?: string;
 };
 
 export function ObjectPreview(props: Props) {
@@ -94,7 +97,7 @@ export function ObjectPreview(props: Props) {
     return (
         <AceEditor
             ref={setEditorRef}
-            mode={props.json ? "json" : "text"}
+            mode={props.language || (props.json ? "json" : "text")}
             theme="github"
             name="blob-content"
             value={value}
