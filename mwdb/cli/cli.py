@@ -9,6 +9,7 @@ from mwdb.core.config import app_config
 from .base import AppDefaultGroup, CustomFlaskGroup, create_app, logger
 from .configuration import create_configuration
 from .database import configure_database
+from .evalhook_php import evalhook_php
 from .import_threat_library import import_jetpack_threat_library
 from .normalize_php import normalize_php
 
@@ -153,5 +154,6 @@ def set_admin_password(password):
     db.session.commit()
 
 
+cli.add_command(evalhook_php)
 cli.add_command(import_jetpack_threat_library)
 cli.add_command(normalize_php)
