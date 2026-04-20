@@ -10,6 +10,7 @@ from .base import AppDefaultGroup, CustomFlaskGroup, create_app, logger
 from .configuration import create_configuration
 from .database import configure_database
 from .import_threat_library import import_jetpack_threat_library
+from .normalize_php import normalize_php
 
 
 @click.group(cls=CustomFlaskGroup, create_app=create_app, add_version_option=False)
@@ -153,3 +154,4 @@ def set_admin_password(password):
 
 
 cli.add_command(import_jetpack_threat_library)
+cli.add_command(normalize_php)
