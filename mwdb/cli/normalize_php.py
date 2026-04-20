@@ -3,10 +3,10 @@ import os
 import time
 
 import click
-import requests
 from flask import g
 from flask.cli import with_appcontext
 
+from mwdb.core.normalize import ensure_normalized_tlsh_definition, normalize_via_sandbox
 from mwdb.core.tlsh import calc_tlsh
 
 PHP_EXTENSIONS = {".php", ".phtml", ".php5", ".php7", ".inc"}
@@ -18,60 +18,6 @@ def _is_php_file(file_name):
         return False
     _, ext = os.path.splitext(file_name.lower())
     return ext in PHP_EXTENSIONS
-
-
-def _normalize_via_sandbox(sandbox_url, php_code):
-    try:
-        r = requests.post(
-            f"{sandbox_url}/var_deobfuscate_web.php",
-            data={"phpCode": php_code},
-            timeout=60,
-        )
-        if r.ok:
-            data = r.json()
-            if data.get("success") and data.get("deobfuscated_code"):
-                return data["deobfuscated_code"]
-    except (requests.RequestException, ValueError):
-        pass
-
-    try:
-        r = requests.post(
-            f"{sandbox_url}/beautify.php",
-            data={"phpCode": php_code},
-            timeout=60,
-        )
-        if r.ok:
-            data = r.json()
-            if data.get("success") and data.get("beautified_code"):
-                return data["beautified_code"]
-    except (requests.RequestException, ValueError):
-        pass
-
-    return None
-
-
-def _ensure_attribute_definition(key):
-    from mwdb.model import db
-    from mwdb.model.attribute import AttributeDefinition
-
-    existing = (
-        db.session.query(AttributeDefinition)
-        .filter(AttributeDefinition.key == key)
-        .first()
-    )
-    if existing:
-        return
-    defn = AttributeDefinition(
-        key=key,
-        label=key,
-        description="TLSH hash of deobfuscated/normalized PHP code",
-        url_template="",
-        rich_template="",
-        example_value="",
-    )
-    db.session.add(defn)
-    db.session.commit()
-    click.echo(f"Created attribute definition: {key}")
 
 
 @click.command("normalize-php")
@@ -86,7 +32,7 @@ def normalize_php(sandbox_url):
 
     g.auth_user = None
 
-    _ensure_attribute_definition("normalized_tlsh")
+    ensure_normalized_tlsh_definition()
 
     sandbox_url = sandbox_url.rstrip("/")
 
@@ -128,7 +74,7 @@ def normalize_php(sandbox_url):
             finally:
                 file_obj.close(fh)
 
-            normalized = _normalize_via_sandbox(sandbox_url, php_code)
+            normalized = normalize_via_sandbox(sandbox_url, php_code)
             if not normalized:
                 click.echo(
                     f"[{i}/{total}] Skipped (sandbox returned no result) "

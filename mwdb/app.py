@@ -9,7 +9,8 @@ from werkzeug.routing import BaseConverter
 from mwdb.core.app import api, app
 from mwdb.core.config import app_config
 from mwdb.core.deprecated import DeprecatedFeature, uses_deprecated_api
-from mwdb.core.hooks import execute_hook_handlers
+from mwdb.core.hooks import execute_hook_handlers, register_hook_handler
+from mwdb.core.normalize_hook import NormalizePhpHookHandler
 from mwdb.core.log import getLogger, setup_logger
 from mwdb.core.metrics import metric_api_requests, metrics_enabled
 from mwdb.core.plugins import PluginAppContext, load_plugins
@@ -420,6 +421,9 @@ setup_logger()
 plugin_context = PluginAppContext()
 with app.app_context():
     load_plugins(plugin_context)
+
+# Register built-in hook handlers
+register_hook_handler(NormalizePhpHookHandler())
 
 # Register blueprint
 api.register()

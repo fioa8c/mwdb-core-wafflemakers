@@ -1,4 +1,7 @@
 services:
+  mwdb:
+    environment:
+      - MWDB_SANDBOX_URL=http://sandbox
   sandbox:
     build:
       context: ../waffle-makers-tooling/security-research-malware-sandbox
