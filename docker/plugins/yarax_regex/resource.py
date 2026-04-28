@@ -61,6 +61,12 @@ class YaraXRegexResource(Resource):
             413:
                 description: Regex exceeds length cap
         """
+        # Pre-parse guard: reject obviously-too-big bodies before Flask buffers
+        # them into memory. The 4 KB regex cap means a legitimate request body
+        # is well under 5 KB; allow 16 KB as a defensive ceiling.
+        if request.content_length is not None and request.content_length > 16 * 1024:
+            raise RequestEntityTooLarge("Request body too large")
+
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             raise BadRequest("Request body must be a JSON object")

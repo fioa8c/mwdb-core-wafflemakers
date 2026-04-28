@@ -5,11 +5,11 @@ build a minimal Flask app with our resource registered and a stubbed
 File.access function injected via monkeypatch — same pattern used by
 upstream MWDB's lighter resource tests.
 """
-from unittest.mock import MagicMock, patch
+import sys
+from unittest.mock import MagicMock
 
 import pytest
 from flask import Flask
-from flask.views import MethodView
 
 
 @pytest.fixture
@@ -38,9 +38,8 @@ def app(monkeypatch):
     monkeypatch.setattr("mwdb.model.File.access", fake_file_access)
 
     # Re-import the resource module so it picks up the patched decorator.
-    import importlib
-    if "yarax_regex.resource" in list(__import__("sys").modules):
-        del __import__("sys").modules["yarax_regex.resource"]
+    if "yarax_regex.resource" in sys.modules:
+        del sys.modules["yarax_regex.resource"]
     from yarax_regex.resource import YaraXRegexResource
 
     flask_app = Flask(__name__)

@@ -8,13 +8,23 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-# On the host (macOS), libmagic may not be on the default search path used by
-# the `magic` package even though `brew install libmagic` is present.  This
-# causes `mwdb.model` and `mwdb.resources` to fail to import before pytest
-# even collects the test module.  Pre-register lightweight stubs so that
-# (a) the test fixture can monkeypatch them, and (b) the resource module can
-# import `from mwdb.resources import requires_authorization` and
-# `from mwdb.model import File`.
+# Pre-register lightweight stubs for `mwdb.resources` and `mwdb.model` in
+# sys.modules so the resource module's top-level imports
+# (`from mwdb.resources import requires_authorization`,
+#  `from mwdb.model import File`) succeed without requiring the full MWDB
+# dependency stack on the test host. The `app` fixture in test_resource.py
+# then monkeypatches these stubs with per-test behavior.
+#
+# Note: conftest runs before pytest collects test modules, so the
+# `if "mwdb.X" not in sys.modules` guard always fires here — the stubs are
+# effectively unconditional. The guard exists as a safety net in case
+# someone refactors test discovery to import the real modules earlier.
+#
+# The motivating issue: `magic` (the libmagic Python binding) doesn't find
+# libmagic on Apple Silicon Homebrew paths, which would otherwise make
+# `import mwdb.model` raise on macOS dev hosts. Inside the Debian-slim
+# Docker container the real modules import fine — but Task 4's tests run
+# on the host (the Docker container is exercised in Task 5's smoke test).
 
 def _identity_decorator(f):
     return f
