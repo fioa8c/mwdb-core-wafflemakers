@@ -1,0 +1,7 @@
+{
+    "name": "@mwdb-web/plugin-yarax-regex",
+    "version": "0.1.0",
+    "description": "YARA-X live regex playground for the MWDB sample detail page",
+    "main": "./index.tsx",
+    "private": true
+}

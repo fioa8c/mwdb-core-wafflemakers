@@ -1,0 +1,16 @@
+[project]
+name = "yarax-regex"
+version = "0.1.0"
+description = "YARA-X live regex playground for the MWDB sample detail page"
+requires-python = ">=3.12"
+dependencies = [
+    "yara-x==1.15.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["yarax_regex"]
+package-dir = {"yarax_regex" = "."}
