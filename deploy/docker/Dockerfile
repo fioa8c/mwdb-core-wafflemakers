@@ -53,7 +53,7 @@ RUN apt-get update \
 # Copy the application from the builder.
 # Debian's `nobody` user belongs to the `nogroup` group (Alpine had `nobody:nobody`).
 COPY --from=builder --chown=nobody:nogroup /app /app
-ENV PATH="/app/venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH"
 
 USER nobody
 RUN mkdir -m 700 /app/uploads
