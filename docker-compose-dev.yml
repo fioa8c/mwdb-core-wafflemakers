@@ -26,6 +26,7 @@ services:
       - mwdb-vars.env
     environment:
       HOT_RELOAD: 1
+      MWDB_PLUGINS: "yarax_regex"
       MWDB_MAIL_SMTP: "mailhog:1025"
       MWDB_MAIL_FROM: "noreply@mwdb.dev"
       MWDB_RECAPTCHA_SITE_KEY: "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"
