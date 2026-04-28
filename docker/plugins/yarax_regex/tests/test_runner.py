@@ -114,7 +114,13 @@ def test_warnings_propagated_when_yarax_emits_them():
 
 def test_scanner_timeout_is_set():
     """Smoke test: a scanner timeout should be configured. Verify by
-    checking the runner's exposed timeout constant."""
+    checking the runner's exposed timeout constant.
+
+    NOTE: this test only verifies the constant exists and is in a sensible
+    range; it does NOT verify that scanner.set_timeout() is actually called
+    in run(). Triggering a real timeout in a unit test is impractical; this
+    is the best smoke check we have.
+    """
     assert hasattr(runner, "SCAN_TIMEOUT_SECONDS")
     assert isinstance(runner.SCAN_TIMEOUT_SECONDS, int)
     assert 1 <= runner.SCAN_TIMEOUT_SECONDS <= 30

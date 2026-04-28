@@ -37,11 +37,12 @@ def _byte_offset_to_line_column(sample_bytes: bytes, offset: int) -> tuple[int, 
     Newlines are LF (b'\\n'). For samples with CRLF, the column counts the
     CR as a regular byte; this matches how editors display PHP/JS sources.
     """
-    if offset <= 0:
+    assert offset >= 0, f"byte offset must be non-negative, got {offset}"
+    if offset == 0:
         return 1, 1
     prefix = sample_bytes[:offset]
-    line = prefix.count(b"\n") + 1
     last_nl = prefix.rfind(b"\n")
+    line = prefix.count(b"\n") + 1
     column = offset - (last_nl + 1) + 1
     return line, column
 
@@ -87,6 +88,10 @@ def run(regex: str, sample_bytes: bytes) -> dict[str, Any]:
     Empty regex is treated as a compile error (the resource layer rejects
     empty regex with HTTP 400 before reaching here; this is defense in depth).
     """
+    # `elapsed_ms` is included on the success path and on scan_timeout (where
+    # it represents the bound wall-clock spent scanning), but is omitted on
+    # compile_error responses where no scan was attempted. Frontend must guard
+    # against its absence on non-ok statuses.
     if regex == "":
         return {
             "status": "compile_error",
@@ -112,6 +117,9 @@ def run(regex: str, sample_bytes: bytes) -> dict[str, Any]:
         }
 
     rules = compiler.build()
+    # Warnings are surfaced by add_source/build, so we read them after build.
+    # Verified working on yara-x 1.15.0; if a future yara-x version invalidates
+    # the compiler post-build, capture warnings before calling build() instead.
     warnings = list(compiler.warnings())
 
     scanner = yara_x.Scanner(rules)
@@ -136,6 +144,11 @@ def run(regex: str, sample_bytes: bytes) -> dict[str, Any]:
             ],
         }
 
+    # Other scanner exceptions are intentionally NOT caught here. The resource
+    # layer surfaces them as HTTP 500 with the full traceback to the log,
+    # which is correct: an unexpected yara-x failure means the engine is in a
+    # state we can't reason about, and silently returning an empty match list
+    # would mask real bugs.
     matches: list[dict[str, Any]] = []
     for matched_rule in scan_results.matching_rules:
         for pattern in matched_rule.patterns:
