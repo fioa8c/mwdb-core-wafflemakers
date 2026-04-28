@@ -30,6 +30,10 @@ services:
       - mwdb-vars.env
     environment:
       - GUNICORN_WORKERS=2
+      # In-tree plugins under docker/plugins/ get pip-installed into
+      # site-packages, where MWDB's local_plugins_autodiscover scan of
+      # /app/plugins/ won't find them. Name them explicitly here.
+      - MWDB_PLUGINS=yarax_regex
     volumes:
       - mwdb-uploads:/app/uploads
 
