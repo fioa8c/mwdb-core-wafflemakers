@@ -30,7 +30,10 @@ const DEBOUNCE_MS = 200;
 export function YaraXRegexTab() {
     const api = useContext(APIContext);
     const objectContext = useContext(ObjectContext);
-    const object = objectContext?.object as ObjectData | undefined;
+    // ObjectContext.object is Partial<ObjectOrConfigOrBlobData>; the YARA-X
+    // tab only mounts on file objects, so a Partial<ObjectData> view is the
+    // honest narrowing — `.id` is on every variant either way.
+    const object = objectContext?.object as Partial<ObjectData> | undefined;
     const sampleId = object?.id ?? "";
 
     const [regex, setRegex] = useState("");
@@ -82,6 +85,15 @@ export function YaraXRegexTab() {
             // No call. Clear in-flight state. Keep lastOkResult so the user
             // can briefly clear the input and come back without losing
             // their previous highlights.
+            if (debounceRef.current !== null) {
+                window.clearTimeout(debounceRef.current);
+                debounceRef.current = null;
+            }
+            if (abortRef.current) {
+                abortRef.current.abort();
+                abortRef.current = null;
+            }
+            setInFlight(false);
             setLastResult(null);
             return;
         }
@@ -130,6 +142,10 @@ export function YaraXRegexTab() {
             if (debounceRef.current !== null) {
                 window.clearTimeout(debounceRef.current);
             }
+            // Also abort any in-flight request — covers unmount and the
+            // sampleId-changed case where the old response would otherwise
+            // land on the new sample's state.
+            abortRef.current?.abort();
         };
     }, [api, regex, sampleId]);
 
@@ -162,7 +178,7 @@ export function YaraXRegexTab() {
             style={{
                 display: "flex",
                 flexDirection: "column",
-                height: "70vh",
+                minHeight: "70vh",
             }}
         >
             <div style={{ padding: "10px 14px", background: "#fafafa" }}>
