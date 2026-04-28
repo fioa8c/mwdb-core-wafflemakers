@@ -7,7 +7,17 @@ No Flask, no DB — testable in isolation.
 import time
 from typing import Any
 
-import yara_x
+# yara_x is the Rust→Python binding from PyPI. If the wheel is missing or
+# fails to load (mis-deployment, libc mismatch, etc.) we still want the
+# plugin to register and report 503 from the resource layer, rather than
+# crash the whole MWDB process at plugin-load time.
+try:
+    import yara_x
+
+    YARAX_AVAILABLE = True
+except Exception:  # noqa: BLE001 — engine import failure is opaque; treat all as "unavailable"
+    yara_x = None  # type: ignore[assignment]
+    YARAX_AVAILABLE = False
 
 # Maximum wall-clock time for a single scan. The 200 ms client-side debounce
 # already protects against keystroke storms; this guards against pathological
@@ -100,6 +110,21 @@ def run(regex: str, sample_bytes: bytes) -> dict[str, Any]:
                     "severity": "error",
                     "code": "empty_regex",
                     "message": "regex must not be empty",
+                }
+            ],
+        }
+
+    if not YARAX_AVAILABLE:
+        return {
+            "status": "yarax_unavailable",
+            "diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "yarax_unavailable",
+                    "message": (
+                        "yara-x backend unavailable. The Python binding "
+                        "failed to import. Please contact your administrator."
+                    ),
                 }
             ],
         }

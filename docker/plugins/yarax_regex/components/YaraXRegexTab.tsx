@@ -47,6 +47,7 @@ export function YaraXRegexTab() {
 
     const [sampleText, setSampleText] = useState<string>("");
     const [sampleError, setSampleError] = useState<string | null>(null);
+    const [backendUnavailable, setBackendUnavailable] = useState(false);
 
     const debounceRef = useRef<number | null>(null);
     const abortRef = useRef<AbortController | null>(null);
@@ -120,6 +121,13 @@ export function YaraXRegexTab() {
                 if (e?.name === "CanceledError" || e?.name === "AbortError") {
                     return; // superseded by a newer regex
                 }
+                if (e?.response?.status === 503) {
+                    // yara-x backend mis-deployed; surface as a tab-level
+                    // banner rather than confusing the lint strip with what
+                    // looks like a compile error. See spec §5.4 / §6.3.
+                    setBackendUnavailable(true);
+                    return;
+                }
                 setLastResult({
                     status: "compile_error",
                     diagnostics: [
@@ -169,6 +177,14 @@ export function YaraXRegexTab() {
         return (
             <div style={{ padding: "20px", color: "#dc3545" }}>
                 {sampleError}
+            </div>
+        );
+    }
+
+    if (backendUnavailable) {
+        return (
+            <div style={{ padding: "20px", color: "#dc3545" }}>
+                yara-x backend unavailable. Please contact your administrator.
             </div>
         );
     }

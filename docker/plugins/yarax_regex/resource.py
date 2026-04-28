@@ -6,7 +6,7 @@ from mwdb.core.service import Resource
 from mwdb.model import File
 from mwdb.resources import requires_authorization
 
-from . import runner
+from . import logger, runner
 
 
 # Maximum regex length accepted at the endpoint. Real regexes are sub-200
@@ -110,4 +110,20 @@ class YaraXRegexResource(Resource):
 
         sample_bytes = sample.read()
         result = runner.run(regex=regex, sample_bytes=sample_bytes)
+
+        if result.get("status") == "yarax_unavailable":
+            # yara-x failed to import in this worker — surface as 503 so the
+            # frontend can render an admin-facing banner rather than a regex
+            # error. See spec §5.4 / §7.3.
+            response = jsonify(result)
+            response.status_code = 503
+            return response
+
+        logger.info(
+            "yarax_regex eval sample=%s regex_len=%d elapsed_ms=%s status=%s",
+            sample_id,
+            len(regex),
+            result.get("elapsed_ms", 0),
+            result.get("status", "unknown"),
+        )
         return jsonify(result)
