@@ -116,6 +116,23 @@ The v0 deliberately does **not** include team-specific lints (e.g. `\w → [a-z_
 - `yara-x` from PyPI, pinned in the plugin's `pyproject.toml`. Installed into the MWDB backend container at build time.
 - The exact API surface (specifically: whether the Python binding exposes atom info and compile diagnostics in the same form the CLI does) is **verified during plan writing**, not assumed here. If the binding is partial, v0 ships with a smaller `diagnostics`/`atoms` payload; the endpoint contract still applies.
 
+### 4.1.1 Backend base-image shift (added 2026-04-28)
+
+yara-x 1.x ships only manylinux wheels on PyPI — no musllinux wheels and no source distribution from v1.1.0 onward. The fork's existing backend Docker base (`python:3.12-alpine`) uses musl libc and cannot run manylinux wheels, and there is no path to compile yara-x on Alpine because the upstream maintainers stopped publishing sdists.
+
+The fork is therefore migrating the backend container to **`python:3.12-slim-bookworm`** (Debian-slim) as a prerequisite to this plugin. This is a deliberate strategic shift, not a workaround: the team views in-tree plugins as a long-term direction, the dependency footprint that comes with them aligns better with PyPI's wheel ecosystem (which targets glibc), and the slim-bookworm baseline gives easier access to system packages without the apk/musl friction.
+
+Scope of the migration:
+
+- `deploy/docker/Dockerfile` only. Both the builder stage (`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`) and the runtime stage (`python:3.12-slim-bookworm`).
+- Frontend Dockerfiles (`Dockerfile-web`, `Dockerfile-web-dev`, `Dockerfile-web-unit-test`) stay on `node:22-alpine` — they do not need yara-x and the migration cost there is unjustified.
+- `apk add` lines become `apt-get install -y --no-install-recommends ...` with `rm -rf /var/lib/apt/lists/*` for image-size hygiene.
+- Build-stage system packages: `g++` + `python3-dev` (Debian) replace `g++ musl-dev python3-dev` (Alpine). Required because `py-tlsh` has no PyPI wheels at all and is built from sdist on every platform.
+- Runtime-stage system packages: `libpq5 postgresql-client libmagic1 libfuzzy2` (Debian) replace `postgresql-client postgresql-dev libmagic libfuzzy2` (Alpine). `libpq-dev` is a build-only dep and should not be in runtime.
+- The `nobody` user's default group on Debian is `nogroup` (not `nobody`); `--chown=nobody:nobody` becomes `--chown=nobody:nogroup` in the COPY step.
+
+Image-size impact: roughly +60–100 MB compressed compared to Alpine. Acceptable for the team's deployment context per the decision.
+
 ### 4.2 Plugin scaffolding
 
 - **Backend:** `docker/plugins/yarax-regex/` — Python module with `pyproject.toml`/`setup.py` matching the convention used by the fork's other backend plugins. Registers a Flask blueprint via MWDB's plugin entry point. The exact registration mechanics (entry point name, init hook signature) are matched to existing plugins during plan writing.

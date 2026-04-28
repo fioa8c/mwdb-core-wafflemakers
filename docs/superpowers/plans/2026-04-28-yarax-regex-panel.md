@@ -6,7 +6,9 @@
 
 **Architecture:** A single in-tree plugin under `docker/plugins/yarax_regex/` that is **both** a Python package (autoloaded by MWDB via `local_plugins_autodiscover=1`, registers a Flask-RESTful `Resource` at `POST /api/yarax/regex`) and an npm package (`@mwdb-web/plugin-yarax-regex`, registers a new `ObjectTab` via the existing `<Extendable ident="sampleTabs">` slot). Sample bytes are read server-side via `File.access(identifier)` + `File.read()` — no upload, no client-side bytes round-trip. Regex evaluation goes through a synthetic YARA rule compiled and scanned via the `yara-x` PyPI package's `Compiler` + `Scanner` API.
 
-**Tech Stack:** Python 3.12, Flask + Flask-RESTful, `yara-x==1.15.0` (PyPI; Rust → Python via maturin, ships musl wheels), React 18 + TypeScript 5 + Vite, Bootstrap 4 (matches the rest of MWDB), `react-ace` for the syntax-highlighted sample view (already a project dependency).
+**Tech Stack:** Python 3.12, Flask + Flask-RESTful, `yara-x==1.15.0` (PyPI; Rust → Python via maturin, **manylinux wheels only — no musl wheels and no sdist from v1.1.0 onward**), React 18 + TypeScript 5 + Vite, Bootstrap 4 (matches the rest of MWDB), `react-ace` for the syntax-highlighted sample view (already a project dependency).
+
+**Backend base image:** This plan migrates the backend Docker image from `python:3.12-alpine` (musl) to `python:3.12-slim-bookworm` (Debian/glibc). yara-x's wheel format requires it. See spec §4.1.1 for the rationale. The migration happens in Task 2.
 
 **Companion spec:** `docs/superpowers/specs/2026-04-28-yarax-regex-panel-design.md` (commit `90568ea`).
 
@@ -202,72 +204,194 @@ EOF
 
 ---
 
-## Task 2: Add yara-x to backend Docker build
+## Task 2: Migrate backend Docker base from Alpine to Debian-slim
+
+**Why:** yara-x 1.x ships only manylinux wheels on PyPI (no musllinux wheels, no sdist from v1.1.0 onward). The current Alpine base uses musl libc and cannot run manylinux wheels, and there is no source-build path. Per the decision logged in spec §4.1.1, the team is migrating the backend image to `python:3.12-slim-bookworm`. This is the prerequisite for everything that follows.
 
 **Files:**
-- (none modified — confirms the existing Dockerfile picks up the plugin's pyproject.toml automatically)
+- Modify: `deploy/docker/Dockerfile` (entire file — both builder and runtime stages)
 
-The Dockerfile at `deploy/docker/Dockerfile:32-35` already has:
+**Out of scope:** Frontend Dockerfiles (`deploy/docker/Dockerfile-web*`) stay on `node:22-alpine`. Frontend doesn't need yara-x and the migration cost there is unjustified.
+
+- [ ] **Step 2.1: Verify yara-x ships manylinux wheels for the target platform**
+
+```bash
+python3 -m pip download yara-x==1.15.0 --platform manylinux_2_28_x86_64 --only-binary=:all: --no-deps -d /tmp/yarax-manylinux-check
+```
+
+Expected: a wheel like `yara_x-1.15.0-cp38-abi3-manylinux_2_28_x86_64.whl` is downloaded. If this fails, escalate — the migration plan is wrong about wheel availability.
+
+Also confirm there's an arm64 manylinux wheel (relevant if the team ever runs on Apple Silicon Linux VMs):
+
+```bash
+python3 -m pip download yara-x==1.15.0 --platform manylinux_2_28_aarch64 --only-binary=:all: --no-deps -d /tmp/yarax-manylinux-arm64
+```
+
+Expected: `yara_x-1.15.0-...-manylinux_2_28_aarch64.whl` downloads.
+
+- [ ] **Step 2.2: Rewrite the Dockerfile**
+
+Replace the entire content of `deploy/docker/Dockerfile` with:
 
 ```dockerfile
+# syntax=docker/dockerfile:1
+# Inspired by https://github.com/astral-sh/uv-docker-example/blob/fa761744819c05f4ce207bde1f0a396f6be3915f/multistage.Dockerfile
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+
+WORKDIR /app
+
+# Omit development dependencies
+ENV UV_NO_DEV=1
+
+# Disable Python downloads, because we want to use the system interpreter
+# across both images. If using a managed Python version, it needs to be
+# copied from the build image into the final image; see `standalone.Dockerfile`
+# for an example.
+ENV UV_PYTHON_DOWNLOADS=0
+# No hardlinks supported
+ENV UV_LINK_MODE=copy
+
+# Build toolchain for C/C++ extensions compiled from source by uv sync.
+# py-tlsh has no PyPI wheels (built from sdist on every platform).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project
+
+COPY mwdb /app/mwdb
+COPY docker/ pyproject.toml uv.lock /app/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install /app
+
 ARG plugins
 RUN --mount=type=cache,target=/root/.cache/uv \
     for plugin in $plugins $(find /app/plugins \( -name 'setup.py' -o -name 'pyproject.toml' \) -exec dirname {} \; | sort -u);  \
     do uv pip --no-cache-dir install $plugin; done
+
+FROM python:3.12-slim-bookworm
+
+LABEL maintainer="info@cert.pl"
+
+# Runtime libraries:
+#   libpq5            — PostgreSQL client lib (psycopg2 runtime)
+#   postgresql-client — psql CLI used by mwdb-core's startup checks
+#   libmagic1         — file type detection (was apk libmagic)
+#   libfuzzy2         — ssdeep runtime (same name on Debian)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libpq5 postgresql-client libmagic1 libfuzzy2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the application from the builder.
+# Debian's `nobody` user belongs to the `nogroup` group (Alpine had `nobody:nobody`).
+COPY --from=builder --chown=nobody:nogroup /app /app
+ENV PATH="/app/venv/bin:$PATH"
+
+USER nobody
+RUN mkdir -m 700 /app/uploads
+
+ENV PYTHONPATH=/app
+# We still load it directly from the source and not the installed package in .venv
+# to make it "editable" in dev environments
+ENV FLASK_APP=/app/mwdb/app.py
+WORKDIR /app
+
+CMD ["/app/start.sh"]
 ```
 
-This means `yara-x==1.15.0` (declared in `docker/plugins/yarax_regex/pyproject.toml`) gets installed into the backend venv at build time. No Dockerfile changes needed.
+Diff summary versus the previous (Alpine) version:
 
-- [ ] **Step 2.1: Verify yara-x ships musl-compatible wheels**
+- Builder base: `ghcr.io/astral-sh/uv:python3.12-alpine` → `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
+- Runtime base: `python:3.12-alpine` → `python:3.12-slim-bookworm`
+- Build deps: `apk add --no-cache g++ musl-dev python3-dev` → `apt-get install ... g++ python3-dev` (Debian's `g++` brings in `libc6-dev`)
+- Runtime deps: `apk add --no-cache postgresql-client postgresql-dev libmagic libfuzzy2` → `apt-get install ... libpq5 postgresql-client libmagic1 libfuzzy2` (drops the `-dev` package which is a build-only dep, switches to Debian package names)
+- COPY chown: `nobody:nobody` → `nobody:nogroup`
 
-Run on the host:
-```bash
-python3 -m pip download yara-x==1.15.0 --platform musllinux_1_2_x86_64 --only-binary=:all: --no-deps -d /tmp/yarax-musl-check
-```
+- [ ] **Step 2.3: Build the mwdb backend image**
 
-Expected: a wheel like `yara_x-1.15.0-cp38-abi3-musllinux_1_2_x86_64.whl` is downloaded. If this fails with "no compatible wheels", we'd need to add `gcc` / `cargo` to the builder stage to compile from source — investigate before proceeding.
-
-- [ ] **Step 2.2: Build the mwdb backend image with the plugin**
-
-Run from the repo root:
 ```bash
 docker compose -f docker-compose-dev.yml build mwdb
 ```
 
-Expected: build succeeds. The `RUN ... uv pip install $plugin` line in the Dockerfile installs `yarax-regex` and pulls in `yara-x==1.15.0`. Look for a line near the end of the build like:
-```
-+ uv pip install /app/plugins/yarax_regex
-```
-followed by `Installed yarax-regex-0.1.0` and `Installed yara-x-1.15.0` (or similar).
+This will take longer than the previous Alpine build the first time (Debian images pull more layers; `apt-get update` runs once). Plan for 5–10 minutes.
 
-If the build fails because `yara-x` cannot be installed under musl, fall back to adding `cargo` + `rustc` to the apk packages in the builder stage:
-```dockerfile
-RUN apk add --no-cache g++ musl-dev python3-dev cargo rust
-```
-Pin this fallback in a follow-up commit only if the wheel install fails.
+Expected: build succeeds. Watch for these in the output:
+- `Successfully built` lines for both stages
+- A line confirming `yarax-regex` is installed during the plugin loop, e.g. `+ uv pip install /app/plugins/yarax_regex` followed by `Installed yara-x-1.15.0`
+- No errors about missing system packages or musl/glibc mismatches
 
-- [ ] **Step 2.3: Verify the package is importable inside the container**
+If the build fails:
+- For a missing system package: read the error, identify the right Debian package name, add it to the relevant `apt-get install` line, retry.
+- For yara-x specifically failing to find a wheel: that means step 2.1's verification was misleading; escalate.
+- For any other failure, escalate.
 
-Run:
+- [ ] **Step 2.4: Verify yara-x is importable inside the container**
+
 ```bash
 docker compose -f docker-compose-dev.yml run --rm --entrypoint "" mwdb \
-    python -c "import yara_x; print(yara_x.__name__, dir(yara_x))"
+    python -c "import yara_x; print('yara_x version:', yara_x.__name__); print('Compiler:', yara_x.Compiler); print('Scanner:', yara_x.Scanner); print('CompileError:', yara_x.CompileError)"
 ```
 
-Expected: prints `yara_x ['CompileError', 'Compiler', 'Formatter', 'Match', 'MetaType', 'Module', 'Pattern', 'Rule', 'Rules', 'ScanError', 'ScanOptions', 'ScanResults', 'Scanner', 'TimeoutError', ...]`.
+Expected: prints `yara_x version: yara_x`, plus the three class references without errors. If `import yara_x` raises, the manylinux wheel didn't install — escalate.
 
-- [ ] **Step 2.4: Commit (only if step 2.2 needed the cargo fallback)**
+- [ ] **Step 2.5: Verify py-tlsh still works after the base swap**
 
-If step 2.2 succeeded without changes, skip this commit — there's nothing modified. Otherwise:
+py-tlsh was previously compiled under Alpine's musl toolchain. Confirm it still imports cleanly under the Debian toolchain:
+
+```bash
+docker compose -f docker-compose-dev.yml run --rm --entrypoint "" mwdb \
+    python -c "import tlsh; print('tlsh hash of test:', tlsh.hash(b'a' * 100))"
+```
+
+Expected: prints a TLSH hash like `T1xxxxx...` (or `TNULL` if py-tlsh decides 100 bytes of `a` is too low-entropy — that's still successful import). What matters is no `ImportError`.
+
+If py-tlsh raises ImportError, the build deps are wrong — `g++ python3-dev` should be sufficient on Debian-slim, but if not, add `build-essential` to the builder's apt-get install line and rebuild.
+
+- [ ] **Step 2.6: Verify the existing MWDB API still works end-to-end**
+
+A base-image change is wide; confirm the regression surface is clean before moving on. Bring up the full dev stack:
+
+```bash
+docker compose -f docker-compose-dev.yml up -d
+sleep 15  # let postgres + mwdb finish warming up
+curl -fsS http://localhost/api/ping
+```
+
+Expected: `curl` exits 0 and prints `{"status": "ok"}` or similar (mwdb-core's ping endpoint).
+
+If anything else is suspicious in the logs (`docker compose -f docker-compose-dev.yml logs mwdb 2>&1 | tail -50`), investigate before declaring this task done. The new base image must not regress existing behavior.
+
+- [ ] **Step 2.7: Commit**
 
 ```bash
 git add deploy/docker/Dockerfile
 git commit -m "$(cat <<'EOF'
-Docker: add cargo/rust to backend builder for yara-x
+Docker: migrate backend image from Alpine to Debian-slim
 
-yara-x does not ship musl wheels for some platforms. Add
-cargo + rust to the apk install in the builder stage so
-uv pip install can compile yara-x from source under musl.
+yara-x 1.x ships only manylinux wheels on PyPI — no musllinux
+wheels and no sdist from v1.1.0 onward. The Alpine (musl) base
+cannot run manylinux wheels, so this commit moves the backend
+image to python:3.12-slim-bookworm. Frontend Dockerfiles stay
+on node:22-alpine (they don't need yara-x).
+
+Changes:
+  - Builder base: uv:python3.12-alpine → uv:python3.12-bookworm-slim
+  - Runtime base: python:3.12-alpine    → python:3.12-slim-bookworm
+  - apk add → apt-get install --no-install-recommends + apt list cleanup
+  - postgresql-dev (build-only) dropped from runtime; libpq5 replaces it
+  - libmagic → libmagic1 (Debian package name)
+  - --chown=nobody:nobody → --chown=nobody:nogroup (Debian default group)
+
+py-tlsh continues to be compiled from sdist (no PyPI wheels at all),
+now under Debian's g++ instead of Alpine's. Verified the existing
+TLSH hashing path and /api/ping respond identically post-migration.
+
+See docs/superpowers/specs/2026-04-28-yarax-regex-panel-design.md §4.1.1
+for the rationale.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -292,7 +416,7 @@ The runner is a pure-Python module with no Flask dependency. It takes `(regex: s
 python3 -m pip install yara-x==1.15.0 pytest
 ```
 
-Expected: both packages install cleanly. yara-x ships an arm64 macOS wheel and an x86_64 Linux musl wheel.
+Expected: both packages install cleanly. yara-x ships an arm64 macOS wheel and x86_64/aarch64 Linux manylinux wheels.
 
 - [ ] **Step 3.2: Create the empty tests package**
 
