@@ -1,5 +1,5 @@
 {
-    "extends": "../../mwdb/web/tsconfig.json",
+    "extends": "../../tsconfig.json",
     "include": ["**/*.ts", "**/*.tsx"],
     "exclude": ["node_modules"]
 }
