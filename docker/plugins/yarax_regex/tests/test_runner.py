@@ -1,5 +1,6 @@
 """Unit tests for yarax_regex.runner."""
 import pytest
+import yara_x
 
 from yarax_regex import runner
 
@@ -110,6 +111,40 @@ def test_warnings_propagated_when_yarax_emits_them():
     for diag in result["diagnostics"]:
         assert diag["severity"] in ("error", "warning", "info")
         assert isinstance(diag["message"], str)
+
+
+def test_max_matches_per_pattern_is_bounded():
+    """A regex matching every byte against a 2000-byte sample must be
+    capped at MAX_MATCHES_PER_PATTERN, proving scanner.max_matches_per_pattern()
+    is taking effect."""
+    sample = b"a" * 2000
+    result = runner.run(regex=r".", sample_bytes=sample)
+    assert result["status"] == "ok"
+    assert len(result["matches"]) == runner.MAX_MATCHES_PER_PATTERN
+
+
+def test_offset_zero_is_line1_column1():
+    assert runner._byte_offset_to_line_column(b"hello", 0) == (1, 1)
+
+
+def test_offset_at_newline_byte():
+    # The '\n' itself is at offset 3; it sits on line 1 at column 4.
+    assert runner._byte_offset_to_line_column(b"abc\ndef", 3) == (1, 4)
+
+
+def test_offset_first_char_of_second_line():
+    assert runner._byte_offset_to_line_column(b"abc\ndef", 4) == (2, 1)
+
+
+def test_scanner_exception_other_than_timeout(monkeypatch):
+    """Non-TimeoutError scanner exceptions must propagate. The resource layer
+    intentionally surfaces them as HTTP 500; runner does not swallow them."""
+    def _raise(self, _data):
+        raise Exception("unexpected")
+
+    monkeypatch.setattr(yara_x.Scanner, "scan", _raise)
+    with pytest.raises(Exception, match="unexpected"):
+        runner.run(regex=r"foo", sample_bytes=b"foo")
 
 
 def test_scanner_timeout_is_set():
