@@ -1,7 +1,11 @@
 """YARA-X live regex playground for the MWDB sample detail page."""
-import logging
+from __future__ import annotations
 
-from mwdb.core.plugins import PluginAppContext
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mwdb.core.plugins import PluginAppContext
 
 __author__ = "Waffle Makers"
 __version__ = "0.1.0"
@@ -11,7 +15,7 @@ __doc__ = "YARA-X live regex playground for the MWDB sample detail page."
 logger = logging.getLogger("mwdb.plugin.yarax_regex")
 
 
-def entrypoint(app_context: PluginAppContext) -> None:
+def entrypoint(app_context: "PluginAppContext") -> None:
     """Plugin entrypoint — wires up the Flask resource.
 
     Importing the resource module is deferred to avoid a circular import
