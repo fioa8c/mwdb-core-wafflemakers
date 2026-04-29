@@ -1,12 +1,12 @@
 """Flask-RESTful resource for POST /api/phpdeobf/<sample_id>."""
 import os
 
-from flask import jsonify
+from flask import g, jsonify
 from werkzeug.exceptions import NotFound, RequestEntityTooLarge, ServiceUnavailable
 
 import mwdb.model as _mwdb_model
 from mwdb.core.service import Resource
-from mwdb.model import File
+from mwdb.model import File, db
 from mwdb.resources import requires_authorization
 
 from . import logger
@@ -106,13 +106,28 @@ class PhpDeobfResource(Resource):
         blob_name = f"deobfuscated-{identifier}.php"
         share_3rd_party = bool(getattr(sample, "share_3rd_party", False))
 
+        # Share the blob with all workspace groups the requesting user belongs
+        # to — mirrors how the regular upload resources build share_with. Without
+        # this the blob is created but has no ObjectPermission rows, so nobody
+        # can access it (add_parent inherits permissions, but only commits them
+        # as part of the outer transaction which needs to have been started with
+        # at least one give_access first).
+        share_with = [grp for grp in g.auth_user.groups if grp.workspace]
+
         blob, is_new = _mwdb_model.TextBlob.get_or_create(
             result.output,
             blob_name,
             BLOB_TYPE,
             share_3rd_party=share_3rd_party,
             parent=sample,
+            share_with=share_with,
         )
+
+        # Flush the session so all pending writes (ObjectPermission rows from
+        # share_with + the parent relation from add_parent) are persisted before
+        # we return.  The regular ObjectUploader.upload() path does this at
+        # resources/object.py:134; plugins must do it themselves.
+        db.session.commit()
 
         logger.info(
             "phpdeobf eval sample=%s elapsed_ms=%d status=ok created=%s",
