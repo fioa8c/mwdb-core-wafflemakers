@@ -17,6 +17,7 @@ postgres-vars.env
 # fork's in-tree team plugins that ship with the repo.
 docker/plugins/*/
 !docker/plugins/yarax_regex/
+!docker/plugins/phpdeobf/
 docker/mail_templates/
 tests/frontend/cypress/videos/
 tests/frontend/cypress/screenshots/
