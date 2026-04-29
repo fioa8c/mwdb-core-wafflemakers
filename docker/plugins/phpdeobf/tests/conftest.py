@@ -35,3 +35,23 @@ if "mwdb.model" not in sys.modules:
     sys.modules["mwdb.model"] = _stub
     import mwdb as _mwdb_pkg
     _mwdb_pkg.model = _stub
+
+if "mwdb.core" not in sys.modules:
+    _stub = MagicMock()
+    sys.modules["mwdb.core"] = _stub
+    import mwdb as _mwdb_pkg
+    _mwdb_pkg.core = _stub
+
+if "mwdb.core.service" not in sys.modules:
+    from flask.views import MethodView
+
+    # Resource must be a real MethodView subclass so that as_view() and
+    # HTTP-method dispatch work correctly in the test Flask app.
+    class _FakeResource(MethodView):
+        pass
+
+    _stub = MagicMock()
+    _stub.Resource = _FakeResource
+    sys.modules["mwdb.core.service"] = _stub
+    import mwdb.core as _mwdb_core
+    _mwdb_core.service = _stub
