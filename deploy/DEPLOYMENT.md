@@ -80,13 +80,21 @@ EOF
 
 Replace `YOUR_DOMAIN` with your actual domain (e.g., `mwdb.wafflemakers.xyz`) and `YOUR_EMAIL` with the email for Let's Encrypt notifications.
 
-## 4. DNS setup
+## 4. DNS and firewall
 
 Point your domain to the droplet's IP address:
 
 - **A record:** `YOUR_DOMAIN` → `YOUR_DROPLET_IP`
 
 Wait for DNS propagation (check with `dig YOUR_DOMAIN`). Traefik will fail to get a TLS certificate if DNS isn't pointing to the droplet yet.
+
+**Firewall:** ports 80 and 443 must be reachable from the public internet
+(`0.0.0.0/0`), not just your office/VPN. Let's Encrypt validates the
+TLS-ALPN-01 challenge by connecting back to the droplet on 443; if its
+validators are blocked, certificate issuance fails with `Timeout during
+connect (likely firewall problem)` and traefik keeps serving its self-signed
+default cert. If you use a Digital Ocean cloud firewall, allow 80/443 from
+`Anywhere (IPv4 + IPv6)`.
 
 ## 5. Build and start
 
@@ -205,6 +213,28 @@ docker compose -f docker-compose-prod.yml exec -T postgres \
 docker compose -f docker-compose-prod.yml exec -T postgres \
   pg_restore -U mwdb -d mwdb --clean --if-exists < mwdb_backup.dump
 ```
+
+### Restoring onto a fresh server (cross-host migration)
+
+The postgres image's `POSTGRES_PASSWORD` only takes effect on first init of an
+empty data directory. If you populate the volume from another host's dump, the
+restored `mwdb` role keeps its **old** password hash, and the new `gen_vars.sh`
+password in `mwdb-vars.env` won't authenticate — `start.sh` will loop on
+`Waiting for postgres` forever.
+
+After the restore, sync the role's password to the value in `mwdb-vars.env`
+(local socket connections in the postgres image are `trust`, so no password is
+needed for this step):
+
+```bash
+NEW_PW=$(grep '^MWDB_POSTGRES_URI' mwdb-vars.env | sed 's|.*://mwdb:\([^@]*\)@.*|\1|')
+docker compose -f docker-compose-prod.yml exec postgres \
+  psql -U mwdb -d mwdb -c "ALTER USER mwdb WITH PASSWORD '$NEW_PW';"
+docker compose -f docker-compose-prod.yml restart mwdb
+```
+
+The matching `mwdb-uploads` volume should also be transferred — see the
+"Uploads" note under Security.
 
 ## 10. Maintenance
 
