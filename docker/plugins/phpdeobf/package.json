@@ -1,0 +1,7 @@
+{
+    "name": "@mwdb-web/plugin-phpdeobf",
+    "version": "0.1.0",
+    "description": "PHP Deobfuscator plugin for the MWDB sample detail page",
+    "main": "./index.tsx",
+    "private": true
+}
