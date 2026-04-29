@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { APIContext } from "@mwdb-web/commons/api";
@@ -34,12 +34,21 @@ export function PhpDeobfTab() {
     const objectContext = useContext(ObjectContext);
     const object = objectContext?.object as Partial<ObjectData> | undefined;
     const sampleId = object?.id ?? "";
-    const fileName = (object as { file_name?: string } | undefined)?.file_name;
-    const fileSize = (object as { file_size?: number } | undefined)?.file_size;
+    const fileName = object?.file_name;
+    const fileSize = object?.file_size;
 
     const [state, setState] = useState<State>({ kind: "idle" });
     const [sampleHead, setSampleHead] = useState<string>("");
     const [runAnyway, setRunAnyway] = useState(false);
+    const abortRef = useRef<AbortController | null>(null);
+
+    // Abort any in-flight request when the component unmounts or the sample changes,
+    // so a late response doesn't try to setState on an unmounted component.
+    useEffect(() => {
+        return () => {
+            abortRef.current?.abort();
+        };
+    }, [sampleId]);
 
     // Fetch a small slice of the sample for the heuristic check on mount.
     useEffect(() => {
@@ -75,15 +84,24 @@ export function PhpDeobfTab() {
         (!isPhpLike && !runAnyway);
 
     async function onRun() {
+        abortRef.current?.abort();
+        const ctrl = new AbortController();
+        abortRef.current = ctrl;
         setState({ kind: "running" });
         try {
-            const result = await deobfuscate(api.axios, sampleId);
+            const result = await deobfuscate(api.axios, sampleId, ctrl.signal);
+            if (ctrl.signal.aborted) return;
             setState({ kind: "done", result });
         } catch (e: unknown) {
+            if (ctrl.signal.aborted) return;
             const err = e as {
+                name?: string;
                 response?: { status?: number; data?: { message?: string } };
                 message?: string;
             };
+            if (err.name === "CanceledError" || err.name === "AbortError") {
+                return;
+            }
             if (err.response?.status === 503) {
                 setState({ kind: "unavailable" });
                 return;

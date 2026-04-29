@@ -55,3 +55,9 @@ if "mwdb.core.service" not in sys.modules:
     sys.modules["mwdb.core.service"] = _stub
     import mwdb.core as _mwdb_core
     _mwdb_core.service = _stub
+
+if "mwdb.core.hooks" not in sys.modules:
+    _stub = MagicMock()
+    sys.modules["mwdb.core.hooks"] = _stub
+    import mwdb.core as _mwdb_core
+    _mwdb_core.hooks = _stub

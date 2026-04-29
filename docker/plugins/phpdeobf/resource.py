@@ -5,12 +5,14 @@ from flask import g, jsonify
 from werkzeug.exceptions import NotFound, RequestEntityTooLarge, ServiceUnavailable
 
 import mwdb.model as _mwdb_model
+from mwdb.core.hooks import hooks
 from mwdb.core.service import Resource
 from mwdb.model import File
 from mwdb.resources import requires_authorization
 
 from . import logger
 from . import client as _client_module
+from .client import ErrorResult, OkResult, UnavailableResult
 
 # Re-export under a name the tests can monkeypatch.
 client = _client_module
@@ -79,8 +81,6 @@ class PhpDeobfResource(Resource):
             timeout=SIDECAR_TIMEOUT,
         )
 
-        from .client import OkResult, ErrorResult, UnavailableResult
-
         if isinstance(result, UnavailableResult):
             logger.warning("phpdeobf sidecar unavailable: %s", result.detail)
             raise ServiceUnavailable("PHP deobfuscator backend unavailable")
@@ -129,6 +129,14 @@ class PhpDeobfResource(Resource):
         # resources/object.py:134; plugins must do it themselves.
         # Access via _mwdb_model so test monkeypatches on mwdb.model.db take effect.
         _mwdb_model.db.session.commit()
+
+        # Fire the standard blob hooks so listeners (Karton routing, indexers,
+        # etc.) see the new/reused blob — same pattern as TextBlobUploader in
+        # mwdb/resources/blob.py.
+        if is_new:
+            hooks.on_created_text_blob(blob)
+        else:
+            hooks.on_reuploaded_text_blob(blob)
 
         logger.info(
             "phpdeobf eval sample=%s elapsed_ms=%d status=ok created=%s",

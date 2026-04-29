@@ -32,12 +32,16 @@ def app(monkeypatch):
     # under unit tests (no real DB to commit to).
     fake_db = MagicMock()
     monkeypatch.setattr("mwdb.model.db", fake_db)
+    # Stub the blob hooks so we can assert which one was called.
+    fake_hooks = MagicMock()
+    monkeypatch.setattr("mwdb.core.hooks.hooks", fake_hooks)
 
     fake_client = MagicMock()
     if "phpdeobf.resource" in sys.modules:
         del sys.modules["phpdeobf.resource"]
     from phpdeobf import resource as resource_mod
     monkeypatch.setattr(resource_mod, "client", fake_client)
+    monkeypatch.setattr(resource_mod, "hooks", fake_hooks)
 
     flask_app = Flask(__name__)
     flask_app.add_url_rule(
@@ -64,6 +68,7 @@ def app(monkeypatch):
     flask_app.fake_textblob = fake_textblob
     flask_app.fake_client = fake_client
     flask_app.fake_db = fake_db
+    flask_app.fake_hooks = fake_hooks
     flask_app.fake_workspace_group = fake_workspace_group
     return flask_app
 
@@ -157,6 +162,9 @@ def test_ok_creates_blob_and_returns_id(app, client):
     # through a plugin resource that doesn't get the regular ObjectUploader
     # commit, so the resource has to do it explicitly.
     app.fake_db.session.commit.assert_called_once()
+    # The on_created_text_blob hook fires for new blobs (Karton routing etc.).
+    app.fake_hooks.on_created_text_blob.assert_called_once()
+    app.fake_hooks.on_reuploaded_text_blob.assert_not_called()
 
 
 def test_dedupe_returns_existing_blob_with_created_false(app, client):
@@ -173,3 +181,6 @@ def test_dedupe_returns_existing_blob_with_created_false(app, client):
     assert body["status"] == "ok"
     assert body["blob_id"] == "cafebabe" * 8
     assert body["created"] is False
+    # The on_reuploaded_text_blob hook fires for the dedupe path.
+    app.fake_hooks.on_reuploaded_text_blob.assert_called_once()
+    app.fake_hooks.on_created_text_blob.assert_not_called()
