@@ -17,9 +17,19 @@ $port = 18080;
 $pid = null;
 
 function start_server($port) {
-    // Use proc_open so we can capture and later kill the PID.
+    // Fail fast if something is already listening on the port (e.g. a leaked
+    // previous run). A successful fsockopen means the port is occupied.
+    $probe = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+    if ($probe) {
+        fclose($probe);
+        throw new \RuntimeException(
+            "port $port already in use; run `lsof -ti:$port | xargs kill` and retry"
+        );
+    }
+
     $cmd = sprintf('php -S 127.0.0.1:%d server.php > /tmp/phpdeobf-sidecar-test.log 2>&1 & echo $!', $port);
     $pid = (int) trim(shell_exec($cmd));
+
     // Poll for readiness up to 5s.
     $started = microtime(true);
     while (microtime(true) - $started < 5.0) {
@@ -30,10 +40,13 @@ function start_server($port) {
         }
         usleep(100_000);
     }
+
     fwrite(STDERR, "server failed to start in 5s\n");
     fwrite(STDERR, file_get_contents('/tmp/phpdeobf-sidecar-test.log'));
-    posix_kill($pid, SIGTERM);
-    exit(1);
+    if ($pid > 0) {
+        posix_kill($pid, SIGTERM);
+    }
+    throw new \RuntimeException("server failed to start on port $port in 5s");
 }
 
 function stop_server($pid) {
@@ -57,16 +70,32 @@ function post_json($port, $path, $body) {
     return [$code, json_decode($resp, true)];
 }
 
+function post_raw($port, $path, $rawBody) {
+    $ch = curl_init("http://127.0.0.1:$port$path");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => $rawBody,
+        CURLOPT_TIMEOUT => 10,
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return [$code, json_decode($resp, true)];
+}
+
 function assert_eq($actual, $expected, $label) {
     if ($actual !== $expected) {
-        fwrite(STDERR, "FAIL: $label\n  expected: " . var_export($expected, true) . "\n  got:      " . var_export($actual, true) . "\n");
-        exit(1);
+        throw new \RuntimeException(
+            "FAIL: $label\n  expected: " . var_export($expected, true) . "\n  got:      " . var_export($actual, true)
+        );
     }
     echo "ok: $label\n";
 }
 
+$exitCode = 0;
 $pid = start_server($port);
-
 try {
     // Happy path — trivial PHP, just round-trips through PrettyPrinter.
     [$code, $body] = post_json($port, '/deobfuscate', [
@@ -75,12 +104,10 @@ try {
     assert_eq($code, 200, 'happy path: 200');
     assert_eq($body['status'], 'ok', 'happy path: status=ok');
     if (!isset($body['output']) || !is_string($body['output'])) {
-        fwrite(STDERR, "FAIL: happy path: output missing or not a string\n");
-        exit(1);
+        throw new \RuntimeException("FAIL: happy path: output missing or not a string");
     }
     if (!isset($body['elapsed_ms']) || !is_int($body['elapsed_ms'])) {
-        fwrite(STDERR, "FAIL: happy path: elapsed_ms missing or not int\n");
-        exit(1);
+        throw new \RuntimeException("FAIL: happy path: elapsed_ms missing or not int");
     }
     echo "ok: happy path: output and elapsed_ms present\n";
 
@@ -102,7 +129,26 @@ try {
     assert_eq($body['status'], 'error', 'too large: status=error');
     assert_eq($body['code'], 'input_too_large', 'too large: code=input_too_large');
 
+    // Bad request — non-JSON body.
+    [$code, $body] = post_raw($port, '/deobfuscate', 'not json at all');
+    assert_eq($code, 400, 'bad request (non-json): 400');
+    assert_eq($body['code'], 'bad_request', 'bad request (non-json): code=bad_request');
+
+    // Bad request — missing source field.
+    [$code, $body] = post_json($port, '/deobfuscate', ['filename' => 'x.php']);
+    assert_eq($code, 400, 'bad request (missing source): 400');
+    assert_eq($body['code'], 'bad_request', 'bad request (missing source): code=bad_request');
+
+    // Not found — wrong route.
+    [$code, $body] = post_json($port, '/wrong/path', ['source' => '<?php echo 1;']);
+    assert_eq($code, 404, 'not found: 404');
+    assert_eq($body['code'], 'not_found', 'not found: code=not_found');
+
     echo "\nALL PASSED\n";
+} catch (\Throwable $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    $exitCode = 1;
 } finally {
     stop_server($pid);
 }
+exit($exitCode);

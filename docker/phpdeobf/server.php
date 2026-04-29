@@ -34,7 +34,8 @@ function emit_error($code, $message) {
 }
 
 // Only POST /deobfuscate is supported. Anything else → 404.
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' || $_SERVER['REQUEST_URI'] !== '/deobfuscate') {
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST' || $path !== '/deobfuscate') {
     emit(404, ['status' => 'error', 'code' => 'not_found', 'message' => 'unknown route']);
 }
 
