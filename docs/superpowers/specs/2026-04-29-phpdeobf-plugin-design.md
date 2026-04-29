@@ -104,7 +104,7 @@ POST /api/phpdeobf/<sample_id>
 (no body — sample_id is the only input; everything else is server-side)
 
 200  {"status": "ok",    "blob_id": "<sha256>", "created": true|false, "elapsed_ms": N}
-200  {"status": "error", "code": "parse_error" | "input_too_large", "message": "..."}
+200  {"status": "error", "code": "parse_error" | "input_too_large" | "internal_error", "message": "..."}
 404  {"message": "Sample not found or you don't have access"}
 413  {"message": "Sample exceeds maximum size of 5 MB"}
 503  {"message": "PHP deobfuscator backend unavailable"}
@@ -241,6 +241,12 @@ Skipped unless the sidecar is reachable (env-var skip pattern; matches existing 
 ### 9.1 Vendoring the deobfuscator
 
 The PHPDeobfuscator source is **vendored** under `docker/phpdeobf/` in this repo so the dev compose build context is reproducible. A small `docker/phpdeobf/sync-from-source.sh` script refreshes the vendored copy from `~/WORK/PHPDeobfuscator/` when needed. This trades a manual sync step for not depending on a sibling working directory. (Alternative considered: relative build context pointing at `~/WORK/PHPDeobfuscator/` — rejected because it makes the compose file non-portable.)
+
+> **Two `phpdeobf` paths, on purpose:**
+> - `docker/plugins/phpdeobf/` — the **MWDB plugin** (Python + TS), loaded by `core/plugins.py` like every other plugin.
+> - `docker/phpdeobf/` — the **vendored deobfuscator source** (PHP), used as the sidecar's Docker build context. Not loaded as a plugin.
+>
+> They are independent and live side-by-side under `docker/`.
 
 ### 9.2 Compose service
 
