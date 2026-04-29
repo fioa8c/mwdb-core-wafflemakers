@@ -26,7 +26,8 @@ services:
       - mwdb-vars.env
     environment:
       HOT_RELOAD: 1
-      MWDB_PLUGINS: "yarax_regex"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf"
+      MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
       MWDB_MAIL_SMTP: "mailhog:1025"
       MWDB_MAIL_FROM: "noreply@mwdb.dev"
       MWDB_RECAPTCHA_SITE_KEY: "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"
@@ -74,6 +75,11 @@ services:
       - "127.0.0.1:54322:5432"
     volumes:
       - mwdb-postgres:/var/lib/postgresql/data
+  phpdeobf:
+    build:
+      context: ./docker/phpdeobf
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
   redis:
     image: redis:alpine
   mailhog:
