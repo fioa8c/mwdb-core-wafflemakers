@@ -6,7 +6,7 @@ from werkzeug.exceptions import NotFound, RequestEntityTooLarge, ServiceUnavaila
 
 import mwdb.model as _mwdb_model
 from mwdb.core.service import Resource
-from mwdb.model import File, db
+from mwdb.model import File
 from mwdb.resources import requires_authorization
 
 from . import logger
@@ -127,7 +127,8 @@ class PhpDeobfResource(Resource):
         # share_with + the parent relation from add_parent) are persisted before
         # we return.  The regular ObjectUploader.upload() path does this at
         # resources/object.py:134; plugins must do it themselves.
-        db.session.commit()
+        # Access via _mwdb_model so test monkeypatches on mwdb.model.db take effect.
+        _mwdb_model.db.session.commit()
 
         logger.info(
             "phpdeobf eval sample=%s elapsed_ms=%d status=ok created=%s",

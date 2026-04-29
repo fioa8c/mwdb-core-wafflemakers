@@ -28,6 +28,10 @@ def app(monkeypatch):
     monkeypatch.setattr("mwdb.model.File.access", fake_file_access)
     fake_textblob = MagicMock()
     monkeypatch.setattr("mwdb.model.TextBlob", fake_textblob)
+    # Stub db.session.commit so the resource's explicit commit is a no-op
+    # under unit tests (no real DB to commit to).
+    fake_db = MagicMock()
+    monkeypatch.setattr("mwdb.model.db", fake_db)
 
     fake_client = MagicMock()
     if "phpdeobf.resource" in sys.modules:
@@ -40,9 +44,27 @@ def app(monkeypatch):
         "/api/phpdeobf/<identifier>",
         view_func=resource_mod.PhpDeobfResource.as_view("phpdeobf"),
     )
+
+    # Stub g.auth_user with one workspace group so share_with construction
+    # in the resource succeeds. Real MWDB sets this in the require_auth
+    # before_request hook; here we mimic it with our own.
+    fake_workspace_group = MagicMock()
+    fake_workspace_group.workspace = True
+    fake_non_workspace_group = MagicMock()
+    fake_non_workspace_group.workspace = False
+    fake_auth_user = MagicMock()
+    fake_auth_user.groups = [fake_workspace_group, fake_non_workspace_group]
+
+    @flask_app.before_request
+    def _stub_auth_user():
+        from flask import g
+        g.auth_user = fake_auth_user
+
     flask_app.fake_file_access = fake_file_access
     flask_app.fake_textblob = fake_textblob
     flask_app.fake_client = fake_client
+    flask_app.fake_db = fake_db
+    flask_app.fake_workspace_group = fake_workspace_group
     return flask_app
 
 
@@ -128,6 +150,13 @@ def test_ok_creates_blob_and_returns_id(app, client):
     # First positional args: (content, blob_name, blob_type, ...)
     assert call_args[0] == "<?php\n\necho 3;"
     assert call_args[2] == "deobfuscated-php"
+    # share_with must include only workspace groups (regression test:
+    # without share_with the blob has no permission rows and is invisible)
+    assert call_kwargs["share_with"] == [app.fake_workspace_group]
+    # The session must be committed — the create-and-return path goes
+    # through a plugin resource that doesn't get the regular ObjectUploader
+    # commit, so the resource has to do it explicitly.
+    app.fake_db.session.commit.assert_called_once()
 
 
 def test_dedupe_returns_existing_blob_with_created_false(app, client):
