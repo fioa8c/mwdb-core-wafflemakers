@@ -26,7 +26,7 @@ services:
       - mwdb-vars.env
     environment:
       HOT_RELOAD: 1
-      MWDB_PLUGINS: "yarax_regex,phpdeobf"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,wpsandbox"
       MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
       MWDB_MAIL_SMTP: "mailhog:1025"
       MWDB_MAIL_FROM: "noreply@mwdb.dev"

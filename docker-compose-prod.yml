@@ -33,7 +33,7 @@ services:
       # In-tree plugins under docker/plugins/ get pip-installed into
       # site-packages, where MWDB's local_plugins_autodiscover scan of
       # /app/plugins/ won't find them. Name them explicitly here.
-      - MWDB_PLUGINS=yarax_regex,phpdeobf
+      - MWDB_PLUGINS=yarax_regex,phpdeobf,wpsandbox
       - MWDB_PHPDEOBF_URL=http://phpdeobf:8080
     volumes:
       - mwdb-uploads:/app/uploads

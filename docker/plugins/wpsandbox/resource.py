@@ -23,7 +23,7 @@ from mwdb.core.service import Resource
 from mwdb.model import File
 from mwdb.resources import requires_authorization
 
-from . import config, logger
+from . import attributes, config, logger
 from .model import WpSandboxRun, ensure_schema
 from .jobs import get_queue as _get_queue
 from .validation import ValidationError, normalize_params
@@ -42,6 +42,13 @@ def _ensure_schema_once():
     global _schema_ready
     if not _schema_ready:
         _schema_ready = ensure_schema()
+        if _schema_ready:
+            try:
+                attributes.ensure_attribute_definitions()
+            except Exception as e:
+                logger.warning(
+                    "wpsandbox: could not ensure attribute definitions: %s", e
+                )
 
 
 def _now():
