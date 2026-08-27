@@ -9,7 +9,13 @@
 from datetime import datetime, timezone
 
 from flask import g, jsonify, request
-from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
+from werkzeug.exceptions import (
+    BadRequest,
+    Conflict,
+    Forbidden,
+    NotFound,
+    ServiceUnavailable,
+)
 
 import mwdb.model as _mwdb_model
 from mwdb.core.capabilities import Capabilities
@@ -18,7 +24,7 @@ from mwdb.model import File
 from mwdb.resources import requires_authorization
 
 from . import config, logger
-from .model import TERMINAL, WpSandboxRun, ensure_schema
+from .model import WpSandboxRun, ensure_schema
 from .jobs import get_queue as _get_queue
 from .validation import ValidationError, normalize_params
 
@@ -42,10 +48,13 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _parse_iso(value):
+def _parse_iso(value, field):
     if value is None:
         return None
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        raise BadRequest(f"Invalid ISO-8601 timestamp: {field}")
 
 
 def _run_json(run, now=None) -> dict:
@@ -155,7 +164,18 @@ class WpSandboxRunListResource(Resource):
         )
         session.add(run)
         session.commit()
-        get_queue().push(run.id)
+        try:
+            get_queue().push(run.id)
+        except Exception as e:
+            run.status = "failed"
+            run.error = f"could not enqueue: {e}"
+            run.finished_at = _now()
+            session.commit()
+            logger.warning(
+                "wpsandbox: could not enqueue run=%s sample=%s mode=%s: %s",
+                run.id, identifier, mode, e,
+            )
+            raise ServiceUnavailable("Could not enqueue sandbox run")
         logger.info("wpsandbox run queued run=%s sample=%s mode=%s", run.id, identifier, mode)
         response = jsonify({"run_id": run.id})
         response.status_code = 202
@@ -223,7 +243,7 @@ class WpSandboxRunResource(Resource):
             run.status = body["status"]
         for key in ("started_at", "finished_at"):
             if key in body:
-                setattr(run, key, _parse_iso(body[key]))
+                setattr(run, key, _parse_iso(body[key], key))
         for key in ("error", "report_blob_id", "sandbox_id"):
             if key in body:
                 setattr(run, key, body[key])
@@ -254,7 +274,9 @@ class WpSandboxRunResource(Resource):
             raise Forbidden("Only the requester or an admin may cancel a run")
         if run.status != "queued":
             raise Conflict("Only queued runs can be cancelled")
-        get_queue().remove(run.id)
+        removed = get_queue().remove(run.id)
+        if removed == 0:
+            raise Conflict("Run was already picked up by the worker")
         _db().session.delete(run)
         _db().session.commit()
         return jsonify({"cancelled": run_id})

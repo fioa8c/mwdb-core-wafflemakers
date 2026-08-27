@@ -142,3 +142,67 @@ def test_get_lists_runs_newest_first(client, app):
 def test_get_404_when_no_access(client, app):
     app.fake_access.return_value = None
     assert client.get("/api/wpsandbox/" + "ab" * 32).status_code == 404
+
+
+# --- PATCH ----------------------------------------------------------------
+
+def test_patch_400_on_bad_timestamp(client, app):
+    run_id = client.post(
+        "/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}
+    ).get_json()["run_id"]
+    app.user.login = "wpsandbox-worker"
+    r = client.patch(
+        "/api/wpsandbox/run/" + run_id, json={"started_at": "not-a-date"}
+    )
+    assert r.status_code == 400, r.data
+    assert "started_at" in r.get_json()["message"]
+
+
+# --- DELETE -----------------------------------------------------------------
+
+def test_delete_queued_run_by_requester(client, app):
+    run_id = client.post(
+        "/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}
+    ).get_json()["run_id"]
+    r = client.delete("/api/wpsandbox/run/" + run_id)
+    assert r.status_code == 200, r.data
+    assert r.get_json() == {"cancelled": run_id}
+    listing = client.get("/api/wpsandbox/" + "ab" * 32).get_json()["runs"]
+    assert listing == []
+
+
+def test_delete_conflict_when_worker_already_picked_up(client, app):
+    run_id = client.post(
+        "/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}
+    ).get_json()["run_id"]
+    # Simulate the worker's BLPOP winning the race before the DELETE arrives.
+    app.redis.lrem("wpsandbox:jobs", 0, run_id)
+    r = client.delete("/api/wpsandbox/run/" + run_id)
+    assert r.status_code == 409, r.data
+    assert client.get("/api/wpsandbox/run/" + run_id).status_code == 200
+
+
+# --- POST enqueue failure ---------------------------------------------------
+
+class _FailingQueue:
+    def push(self, run_id):
+        raise RuntimeError("redis down")
+
+
+def test_post_503_and_marks_failed_when_enqueue_raises(client, app, monkeypatch):
+    from wpsandbox import resource as res
+
+    monkeypatch.setattr(res, "get_queue", lambda: _FailingQueue())
+    r = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
+    assert r.status_code == 503, r.data
+
+    rows = app.db.session.query(WpSandboxRun).all()
+    assert len(rows) == 1
+    assert rows[0].status == "failed"
+    assert "redis down" in rows[0].error
+
+    # Queue recovers -> an identical POST is no longer blocked by a 409
+    # (the failed run is terminal) and now succeeds.
+    monkeypatch.setattr(res, "get_queue", lambda: JobQueue(app.redis))
+    r2 = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
+    assert r2.status_code == 202, r2.data
