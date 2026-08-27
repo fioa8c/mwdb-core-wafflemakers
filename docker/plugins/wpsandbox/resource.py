@@ -248,15 +248,7 @@ class WpSandboxRunResource(Resource):
             if key in body:
                 setattr(run, key, body[key])
         _db().session.commit()
-        # For the response, use the started_at time as reference if set, to avoid
-        # incorrectly marking newly-started runs as failed due to timeout.
-        if run.started_at is not None:
-            now = run.started_at
-            if now.tzinfo is None:
-                now = now.replace(tzinfo=timezone.utc)
-        else:
-            now = _now()
-        return jsonify(_run_json(run, now))
+        return jsonify(_run_json(run))
 
     @requires_authorization
     def delete(self, run_id):
