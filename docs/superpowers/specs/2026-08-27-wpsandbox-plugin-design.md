@@ -23,10 +23,10 @@ Add a "WP Sandbox" tab to the sample detail page that runs the sample inside a d
 
 Four pieces:
 
-1. **SecEx template `wordpress`** — built from `docker/plugins/wpsandbox/template/wordpress.py`; an instrumented WordPress image snapshotted on SecEx.
-2. **In-VM harness** — `docker/plugins/wpsandbox/template/harness/`, a Python CLI baked into the template that snapshots, triggers the sample, snapshots again, and prints `report.json`.
+1. **SecEx template `wordpress`** — built from `docker/wpsandbox-template/wordpress.py`; an instrumented WordPress image snapshotted on SecEx.
+2. **In-VM harness** — `docker/wpsandbox-template/harness/`, a Python package baked into the template that snapshots, triggers the sample, snapshots again, and prints `report.json`.
 3. **MWDB plugin `wpsandbox`** — `docker/plugins/wpsandbox/`: run table, REST resources, FE tab. Same dual Python+npm layout as `phpdeobf`.
-4. **Worker** — `docker/plugins/wpsandbox/worker/`: a separate container that consumes jobs from Redis, drives SecEx with the `e2b` Python SDK, and writes results back via MWDB's HTTP API. It does not import `mwdb`.
+4. **Worker** — `docker/wpsandbox-worker/`: a separate container that consumes jobs from Redis, drives SecEx with the `e2b` Python SDK, and writes results back via MWDB's HTTP API. It does not import `mwdb`.
 
 ```
 browser ──POST /api/wpsandbox/<hash>──▶ mwdb (plugin) ──RPUSH──▶ redis
@@ -73,7 +73,7 @@ Size caps: file contents and diffs ≤ 256 KB each; request bodies ≤ 64 KB; re
 
 ### 5.1 Model
 
-Table `wpsandbox_run`, created by a plugin Alembic migration registered via `PluginAppContext`:
+Table `wpsandbox_run`. MWDB has no plugin-migration hook, so the plugin creates it idempotently with `WpSandboxRun.__table__.create(bind=db.engine, checkfirst=True)` at entrypoint (and lazily on first request if entrypoint ran before the core schema existed):
 
 | column | type | notes |
 |---|---|---|
@@ -85,7 +85,7 @@ Table `wpsandbox_run`, created by a plugin Alembic migration registered via `Plu
 | `status` | text | `queued` \| `running` \| `done` \| `failed` \| `timeout` |
 | `created_at`, `started_at`, `finished_at` | timestamptz | |
 | `error` | text nullable | |
-| `report_blob_id` | fk `object.id` nullable | the report `TextBlob` |
+| `report_blob_id` | text nullable | dhash (sha256) of the report `TextBlob` — the worker only sees dhashes over HTTP |
 | `sandbox_id` | text nullable | SecEx sandbox id, for log correlation |
 
 Derived, not stored: a run `running` for longer than `MWDB_WPSANDBOX_MAX_TIMEOUT + 600 s` is reported as `failed` with `error="worker lost"`.
@@ -115,14 +115,14 @@ On startup the plugin ensures attribute definitions `c2_host`, `dropped_file`, `
 
 ### 5.4 Frontend tab
 
-Registered via `sampleTabsAfter` as "WP Sandbox".
+Registered via `sampleTabsAfter` as "WP Sandbox". Pure report helpers (`report.ts`) are jest-tested from `docker/plugins/wpsandbox/__tests__/`; `mwdb/web/jest.config.js` gets a `roots` entry for `docker/plugins`.
 
 - **Launcher**: mode selector; webroot fields `path` (default as above), `method`, `query`, `body`; `timeout` (default 120). "Run" disabled with tooltip when the user lacks `adding_blobs`. `409` selects the existing run.
 - **Run list**: time, mode, requester, status (spinner for non-terminal), duration. Polls every 3 s while any run is non-terminal; stops otherwise.
 - **Report view** for the selected run: collapsible sections with count badges — Summary (derived-attribute chips + truncation notice) → Network → Filesystem (created: content in a code viewer; modified: unified diff) → Database → PHP eval layers → Trigger responses → Raw JSON (link to the blob). Failed runs show `error` and a "Re-run" button.
 - All report content is rendered as text. No HTML rendering of any captured body.
 
-## 6. Worker (`docker/plugins/wpsandbox/worker/`)
+## 6. Worker (`docker/wpsandbox-worker/`)
 
 Own Python package (`wpsandbox-worker`), own Dockerfile, compose service `wpsandbox-worker` in `docker-compose-dev.yml` and `docker-compose-prod.yml`. Dependencies: `redis`, `e2b`, `requests`.
 
@@ -184,21 +184,21 @@ Logs: structured JSON lines with `run_id`, `sandbox_id`, `phase`, `duration_ms`.
 ## 8. Security
 
 - Single-use VM, killed in `finally`; template snapshot is read-only.
-- Worker MWDB user is in a dedicated `wpsandbox` group with capabilities `adding_files`, `adding_blobs`, `adding_attributes` only. Artefacts are shared with the parent sample's groups, nothing more.
+- Worker MWDB user is in a dedicated `wpsandbox` group with capabilities `access_all_objects` (download any sample, read its shares), `adding_files`, `adding_blobs`, `adding_parents`, `adding_all_attributes`, `sharing_with_all` (upload artefacts *as* the parent's groups). No user/group management. Artefacts are shared with the parent sample's groups, nothing more.
 - Real egress is an accepted risk (decided 2026-08-26). Mitigations: CIDR blocklist for internal ranges, SMTP ports blocked, everything else logged through mitmproxy.
 - Report content is untrusted: text-only rendering in the UI; no `dangerouslySetInnerHTML`.
 - `PATCH` is restricted by login, not by capability, so no ordinary user can forge run state.
 
 ## 9. Testing
 
-1. **Harness unit tests** (`template/tests/`): manifest diff, DB dump diff, flow/eval/dns log parsing, truncation bookkeeping, plugin slug derivation. Fixtures are small captured dumps.
+1. **Harness unit tests** (`docker/wpsandbox-template/tests/`): manifest diff, DB dump diff, flow/eval/dns log parsing, truncation bookkeeping, plugin slug derivation. Fixtures are small captured dumps.
 2. **Plugin resource tests** (`docker/plugins/wpsandbox/tests/`, same conftest pattern as `phpdeobf`): validation (`400`s), `409` duplicate, Redis push via `fakeredis`, `GET`/`PATCH`/`DELETE` transitions, worker-only `PATCH` auth, "worker lost" derivation.
-3. **Worker unit tests** (`worker/tests/`): fake `Sandbox` with scripted `commands.run`; MWDB mocked with `responses`. Happy path; partial report on timeout; re-queue on SecEx outage; `kill()` always called; attribute extraction; dropped-file upload.
+3. **Worker unit tests** (`docker/wpsandbox-worker/tests/`): fake `Sandbox` with scripted `commands.run`; MWDB mocked with `responses`. Happy path; partial report on timeout; re-queue on SecEx outage; `kill()` always called; attribute extraction; dropped-file upload.
 4. **E2E** (`tests/backend/test_wpsandbox.py`, running stack, worker with `WPSANDBOX_FAKE_SANDBOX=1` returning a canned report): upload → run → poll → child blob + attributes + dropped `File`. `tests/backend/test_wpsandbox_live.py` (skipped unless `E2B_API_KEY` set): one real run of a benign PHP sample that echoes, `curl`s a known URL and touches a file; asserts every report section is non-empty. This is the only check that the template's instrumentation actually works.
 5. **Frontend** (`jest`): report section components — count badges, truncation notice, empty states — against the canned report fixture.
 
 ## 10. Deployment notes
 
 - New compose services: `wpsandbox-worker` (dev + prod). Add `wpsandbox` to `MWDB_PLUGINS` in both compose files.
-- One-time: build the template (`cd docker/plugins/wpsandbox/template && uv run wordpress.py`) against SecEx; create the `wpsandbox-worker` MWDB user + group + API key; set worker env.
+- One-time: build the template (`cd docker/wpsandbox-template && uv run wordpress.py`) against SecEx; create the `wpsandbox-worker` MWDB user + group + API key; set worker env.
 - Verify SecEx reachability from the droplet before choosing worker placement. Document in `deploy/DEPLOYMENT.md`.
