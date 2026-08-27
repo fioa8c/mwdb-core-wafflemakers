@@ -19,7 +19,7 @@ from mwdb.resources import requires_authorization
 
 from . import config, logger
 from .model import TERMINAL, WpSandboxRun, ensure_schema
-from .queue import get_queue as _get_queue
+from .jobs import get_queue as _get_queue
 from .validation import ValidationError, normalize_params
 
 # Re-exported names so tests can monkeypatch them on this module.

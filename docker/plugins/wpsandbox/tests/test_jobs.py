@@ -1,7 +1,7 @@
 import fakeredis
 
 from wpsandbox.config import JOBS_KEY
-from wpsandbox.queue import JobQueue
+from wpsandbox.jobs import JobQueue
 
 
 def test_push_appends_in_order():

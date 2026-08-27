@@ -10,7 +10,7 @@ from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
 from wpsandbox.model import WpSandboxRun, ensure_schema
-from wpsandbox.queue import JobQueue
+from wpsandbox.jobs import JobQueue
 
 
 @pytest.fixture
