@@ -1,7 +1,7 @@
 """Flask test-client tests for wpsandbox.resource with stubbed MWDB."""
 import functools
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import fakeredis
@@ -230,12 +230,13 @@ def test_patch_requires_worker_login(client, app):
 def test_patch_by_worker_updates_fields(client, app):
     run_id = _create(client)
     app.user.login = "wpsandbox-worker"
+    started = (datetime.now(timezone.utc) - timedelta(seconds=5)).replace(microsecond=0)
     r = client.patch(f"/api/wpsandbox/run/{run_id}", json={
-        "status": "running", "started_at": "2026-08-27T10:00:00Z", "sandbox_id": "sbx1"})
+        "status": "running", "started_at": started.isoformat().replace("+00:00", "Z"), "sandbox_id": "sbx1"})
     assert r.status_code == 200
     d = r.get_json()
     assert d["status"] == "running" and d["sandbox_id"] == "sbx1"
-    assert d["started_at"].startswith("2026-08-27T10:00:00")
+    assert d["started_at"] == started.isoformat()
     r = client.patch(f"/api/wpsandbox/run/{run_id}", json={
         "status": "done", "finished_at": "2026-08-27T10:02:00+00:00", "report_blob_id": "cd" * 32})
     assert r.get_json()["status"] == "done" and r.get_json()["report_blob_id"] == "cd" * 32
