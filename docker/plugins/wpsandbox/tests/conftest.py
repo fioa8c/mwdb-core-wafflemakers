@@ -94,6 +94,14 @@ sa.Table("object", _Base.metadata, sa.Column("id", sa.Integer, primary_key=True)
          sa.Column("dhash", sa.String(64)))
 sa.Table("user", _Base.metadata, sa.Column("id", sa.Integer, primary_key=True))
 
+# Physically create these two stand-in tables now (declaring them in metadata
+# is not enough — resource tests execute raw SQL against `object` directly).
+# wpsandbox_run is created later by model.ensure_schema().
+_Base.metadata.create_all(
+    _engine,
+    tables=[_Base.metadata.tables["object"], _Base.metadata.tables["user"]],
+)
+
 if "mwdb.core.capabilities" not in sys.modules:
     _caps = MagicMock()
     _caps.Capabilities.adding_blobs = "adding_blobs"
