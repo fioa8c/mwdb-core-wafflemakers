@@ -17,7 +17,7 @@ def test_webroot_explicit_values_normalised():
         {"mode": "webroot", "path": "/wp-content/uploads/../x.php ", "method": "post",
          "query": "a=1", "body": "b", "timeout": 30},
         max_timeout=300, sample_sha256=SHA, sample_name=None)
-    assert p["path"] == "wp-content/uploads/../x.php".replace("../", "")  # traversal stripped
+    assert p["path"] == "wp-content/x.php"  # normalized via posixpath
     assert p["method"] == "POST" and p["timeout"] == 30
 
 
@@ -39,6 +39,9 @@ def test_plugin_mode_requires_zip_name():
     ({"mode": "webroot", "timeout": 0}, "timeout"),
     ({"mode": "webroot", "timeout": "abc"}, "timeout"),
     ({"mode": "webroot", "path": "wp-content/uploads/x.txt"}, "path"),
+    ({"mode": "webroot", "path": "....//....//x.php"}, "root"),
+    ({"mode": "webroot", "path": "../x.php"}, "root"),
+    ({"mode": "webroot", "path": "wp-content/../../x.php"}, "root"),
 ])
 def test_rejects(body, msg):
     with pytest.raises(ValidationError, match=msg):

@@ -1,4 +1,5 @@
 """Request validation for run creation. Pure functions, no Flask."""
+import posixpath
 
 MODES = ("webroot", "plugin")
 METHODS = ("GET", "POST")
@@ -24,7 +25,11 @@ def _timeout(value, max_timeout: int) -> int:
 def _path(value, sha256: str) -> str:
     if not value:
         return f"wp-content/uploads/{sha256[:8]}.php"
-    p = str(value).strip().lstrip("/").replace("../", "")
+    p = str(value).strip().lstrip("/")
+    p = posixpath.normpath(p)
+    # Ensure path doesn't escape the root
+    if p == ".." or p.startswith("../") or "/../" in p or posixpath.isabs(p) or ".." in p:
+        raise ValidationError("path must stay inside the WordPress root")
     if not p.lower().endswith((".php", ".phtml", ".php5", ".php7", ".inc")):
         raise ValidationError("path must end with a PHP extension")
     return p
