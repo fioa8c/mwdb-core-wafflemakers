@@ -206,3 +206,55 @@ def test_post_503_and_marks_failed_when_enqueue_raises(client, app, monkeypatch)
     monkeypatch.setattr(res, "get_queue", lambda: JobQueue(app.redis))
     r2 = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
     assert r2.status_code == 202, r2.data
+
+
+# --- run item -----------------------------------------------------------
+
+def _create(client):
+    return client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}).get_json()["run_id"]
+
+
+def test_get_run(client):
+    run_id = _create(client)
+    r = client.get(f"/api/wpsandbox/run/{run_id}")
+    assert r.status_code == 200 and r.get_json()["status"] == "queued"
+    assert r.get_json()["sample_sha256"] == "ab" * 32
+    assert client.get("/api/wpsandbox/run/nope").status_code == 404
+
+
+def test_patch_requires_worker_login(client, app):
+    run_id = _create(client)
+    assert client.patch(f"/api/wpsandbox/run/{run_id}", json={"status": "running"}).status_code == 403
+
+
+def test_patch_by_worker_updates_fields(client, app):
+    run_id = _create(client)
+    app.user.login = "wpsandbox-worker"
+    r = client.patch(f"/api/wpsandbox/run/{run_id}", json={
+        "status": "running", "started_at": "2026-08-27T10:00:00Z", "sandbox_id": "sbx1"})
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["status"] == "running" and d["sandbox_id"] == "sbx1"
+    assert d["started_at"].startswith("2026-08-27T10:00:00")
+    r = client.patch(f"/api/wpsandbox/run/{run_id}", json={
+        "status": "done", "finished_at": "2026-08-27T10:02:00+00:00", "report_blob_id": "cd" * 32})
+    assert r.get_json()["status"] == "done" and r.get_json()["report_blob_id"] == "cd" * 32
+
+
+def test_patch_rejects_bad_status(client, app):
+    run_id = _create(client)
+    app.user.login = "wpsandbox-worker"
+    assert client.patch(f"/api/wpsandbox/run/{run_id}", json={"status": "weird"}).status_code == 400
+
+
+def test_delete_forbidden_for_other_user_without_manage_users(client, app):
+    run_id = _create(client)
+    app.user.id = 77
+    app.user.has_rights = lambda cap: cap != "manage_users"
+    assert client.delete(f"/api/wpsandbox/run/{run_id}").status_code == 403
+
+
+def test_delete_running_run_conflicts(client, app):
+    run_id = _create(client)
+    row = app.db.session.get(WpSandboxRun, run_id); row.status = "running"; app.db.session.commit()
+    assert client.delete(f"/api/wpsandbox/run/{run_id}").status_code == 409
