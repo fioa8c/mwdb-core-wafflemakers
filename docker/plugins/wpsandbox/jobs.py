@@ -1,4 +1,5 @@
 """Redis-backed FIFO of run ids. The worker BLPOPs the same key."""
+
 import redis
 
 from . import config

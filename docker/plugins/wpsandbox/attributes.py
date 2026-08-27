@@ -1,4 +1,5 @@
 """Attribute definitions the worker populates from reports."""
+
 from . import logger
 
 ATTRIBUTE_KEYS = ("c2_host", "dropped_file", "wp_user_added")
@@ -11,11 +12,13 @@ DESCRIPTIONS = {
 
 def _session():
     from mwdb.model import db
+
     return db.session
 
 
 def _definition_cls():
     from mwdb.model.attribute import AttributeDefinition
+
     return AttributeDefinition
 
 

@@ -1,4 +1,5 @@
 """Request validation for run creation. Pure functions, no Flask."""
+
 import posixpath
 
 MODES = ("webroot", "plugin")
@@ -28,15 +29,22 @@ def _path(value, sha256: str) -> str:
     p = str(value).strip().lstrip("/")
     p = posixpath.normpath(p)
     # Ensure path doesn't escape the root
-    if p == ".." or p.startswith("../") or "/../" in p or posixpath.isabs(p) or ".." in p:
+    if (
+        p == ".."
+        or p.startswith("../")
+        or "/../" in p
+        or posixpath.isabs(p)
+        or ".." in p
+    ):
         raise ValidationError("path must stay inside the WordPress root")
     if not p.lower().endswith((".php", ".phtml", ".php5", ".php7", ".inc")):
         raise ValidationError("path must end with a PHP extension")
     return p
 
 
-def normalize_params(body: dict, *, max_timeout: int, sample_sha256: str,
-                     sample_name: str | None) -> tuple[str, dict]:
+def normalize_params(
+    body: dict, *, max_timeout: int, sample_sha256: str, sample_name: str | None
+) -> tuple[str, dict]:
     body = body or {}
     mode = body.get("mode")
     if mode not in MODES:

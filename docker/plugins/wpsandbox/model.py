@@ -1,4 +1,5 @@
 """wpsandbox_run table. Created idempotently (MWDB has no plugin migrations)."""
+
 import uuid
 from datetime import datetime, timezone
 
@@ -22,8 +23,12 @@ class WpSandboxRun(db.Model):
     __tablename__ = "wpsandbox_run"
 
     id = db.Column(db.String(36), primary_key=True)
-    object_id = db.Column(db.Integer, db.ForeignKey("object.id", ondelete="CASCADE"),
-                          nullable=False, index=True)
+    object_id = db.Column(
+        db.Integer,
+        db.ForeignKey("object.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     requested_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL"))
     mode = db.Column(db.String(16), nullable=False)
     params = db.Column(db.JSON, nullable=False, default=dict)

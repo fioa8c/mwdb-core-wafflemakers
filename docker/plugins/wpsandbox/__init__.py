@@ -1,5 +1,6 @@
 """WordPress sandbox plugin — runs samples in a SecEx WordPress microVM
 and attaches behavioural reports to the sample."""
+
 from __future__ import annotations
 
 import logging
@@ -26,7 +27,9 @@ def entrypoint(app_context: "PluginAppContext") -> None:
     except Exception as e:  # schema may not exist yet during `mwdb-core configure`
         logger.warning("wpsandbox: deferred setup until first request: %s", e)
 
-    app_context.register_resource(WpSandboxRunListResource, "/wpsandbox/<hash64:identifier>")
+    app_context.register_resource(
+        WpSandboxRunListResource, "/wpsandbox/<hash64:identifier>"
+    )
     app_context.register_resource(WpSandboxRunResource, "/wpsandbox/run/<run_id>")
     logger.info("Registered /api/wpsandbox/<sample> and /api/wpsandbox/run/<id>")
 

@@ -1,11 +1,12 @@
 """REST resources for the wpsandbox plugin.
 
-  POST   /api/wpsandbox/<hash>        create a run (202) — requires adding_blobs
-  GET    /api/wpsandbox/<hash>        list runs for a sample
-  GET    /api/wpsandbox/run/<id>      poll one run
-  PATCH  /api/wpsandbox/run/<id>      worker-only status update
-  DELETE /api/wpsandbox/run/<id>      cancel a queued run
+POST   /api/wpsandbox/<hash>        create a run (202) — requires adding_blobs
+GET    /api/wpsandbox/<hash>        list runs for a sample
+GET    /api/wpsandbox/run/<id>      poll one run
+PATCH  /api/wpsandbox/run/<id>      worker-only status update
+DELETE /api/wpsandbox/run/<id>      cancel a queued run
 """
+
 from datetime import datetime, timezone
 
 from flask import g, jsonify, request
@@ -24,8 +25,8 @@ from mwdb.model import File
 from mwdb.resources import requires_authorization
 
 from . import attributes, config, logger
-from .model import WpSandboxRun, ensure_schema
 from .jobs import get_queue as _get_queue
+from .model import WpSandboxRun, ensure_schema
 from .validation import ValidationError, normalize_params
 
 # Re-exported names so tests can monkeypatch them on this module.
@@ -68,9 +69,9 @@ def _run_json(run, now=None) -> dict:
     """Run dict + the parent sample's sha256 (dhash), which the worker needs."""
     d = run.to_dict(now)
     table = _db().Model.metadata.tables["object"]
-    row = _db().session.execute(
-        table.select().where(table.c.id == run.object_id)
-    ).first()
+    row = (
+        _db().session.execute(table.select().where(table.c.id == run.object_id)).first()
+    )
     d["sample_sha256"] = row.dhash if row is not None else None
     return d
 
@@ -97,7 +98,8 @@ class WpSandboxRunListResource(Resource):
         if sample is None:
             raise NotFound("Sample not found or you don't have access to it")
         runs = (
-            _db().session.query(WpSandboxRun)
+            _db()
+            .session.query(WpSandboxRun)
             .filter(WpSandboxRun.object_id == sample.id)
             .order_by(WpSandboxRun.created_at.desc())
             .all()
@@ -159,7 +161,10 @@ class WpSandboxRunListResource(Resource):
             .all()
         )
         for run in active:
-            if run.params == params and run.effective_status()[0] in ("queued", "running"):
+            if run.params == params and run.effective_status()[0] in (
+                "queued",
+                "running",
+            ):
                 response = jsonify(
                     {"run_id": run.id, "message": "An identical run is already active"}
                 )
@@ -180,10 +185,15 @@ class WpSandboxRunListResource(Resource):
             session.commit()
             logger.warning(
                 "wpsandbox: could not enqueue run=%s sample=%s mode=%s: %s",
-                run.id, identifier, mode, e,
+                run.id,
+                identifier,
+                mode,
+                e,
             )
             raise ServiceUnavailable("Could not enqueue sandbox run")
-        logger.info("wpsandbox run queued run=%s sample=%s mode=%s", run.id, identifier, mode)
+        logger.info(
+            "wpsandbox run queued run=%s sample=%s mode=%s", run.id, identifier, mode
+        )
         response = jsonify({"run_id": run.id})
         response.status_code = 202
         return response
@@ -277,7 +287,9 @@ class WpSandboxRunResource(Resource):
         """
         run = self._load(run_id)
         user = g.auth_user
-        if run.requested_by != user.id and not user.has_rights(Capabilities.manage_users):
+        if run.requested_by != user.id and not user.has_rights(
+            Capabilities.manage_users
+        ):
             raise Forbidden("Only the requester or an admin may cancel a run")
         if run.status != "queued":
             raise Conflict("Only queued runs can be cancelled")
