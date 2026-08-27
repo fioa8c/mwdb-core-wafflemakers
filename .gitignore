@@ -24,3 +24,4 @@ tests/frontend/cypress/videos/
 tests/frontend/cypress/screenshots/
 build/
 dist/
+.claude/
