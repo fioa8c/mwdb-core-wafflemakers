@@ -26,6 +26,12 @@ def entrypoint(app_context: "PluginAppContext") -> None:
         attributes.ensure_attribute_definitions()
     except Exception as e:  # schema may not exist yet during `mwdb-core configure`
         logger.warning("wpsandbox: deferred setup until first request: %s", e)
+        try:
+            from mwdb.model import db
+
+            db.session.rollback()
+        except Exception:
+            pass
 
     app_context.register_resource(
         WpSandboxRunListResource, "/wpsandbox/<hash64:identifier>"

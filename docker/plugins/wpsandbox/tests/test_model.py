@@ -50,6 +50,20 @@ def test_ensure_schema_idempotent_and_persists():
     assert db.session.get(WpSandboxRun, r.id).mode == "webroot"
 
 
+def test_stale_queued_run_reported_as_failed(monkeypatch):
+    monkeypatch.setenv("MWDB_WPSANDBOX_MAX_TIMEOUT", "300")
+    r = WpSandboxRun.new(object_id=1, requested_by=2, mode="webroot", params={})
+    r.created_at = datetime.now(timezone.utc) - timedelta(seconds=300 + 600 + 1)
+    assert r.effective_status() == ("failed", "worker lost")
+
+
+def test_fresh_queued_run_stays_queued(monkeypatch):
+    monkeypatch.setenv("MWDB_WPSANDBOX_MAX_TIMEOUT", "300")
+    r = WpSandboxRun.new(object_id=1, requested_by=2, mode="webroot", params={})
+    r.created_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    assert r.effective_status() == ("queued", None)
+
+
 def test_ensure_schema_swallows_errors(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("db down")

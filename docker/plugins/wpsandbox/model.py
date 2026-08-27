@@ -8,7 +8,6 @@ from mwdb.model import db
 from . import config, logger
 
 STATUSES = ("queued", "running", "done", "failed", "timeout")
-TERMINAL = ("done", "failed", "timeout")
 
 
 def _iso(dt):
@@ -60,6 +59,12 @@ class WpSandboxRun(db.Model):
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
             if (now - started).total_seconds() > config.worker_lost_after():
+                return "failed", "worker lost"
+        if self.status == "queued" and self.created_at is not None:
+            created = self.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if (now - created).total_seconds() > config.worker_lost_after():
                 return "failed", "worker lost"
         return self.status, self.error
 

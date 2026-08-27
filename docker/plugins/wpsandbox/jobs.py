@@ -7,7 +7,9 @@ from . import config
 
 class JobQueue:
     def __init__(self, client=None):
-        self.client = client or redis.Redis.from_url(config.redis_url())
+        self.client = client or redis.Redis.from_url(
+            config.redis_url(), socket_timeout=5, socket_connect_timeout=5
+        )
 
     def push(self, run_id: str) -> None:
         self.client.rpush(config.JOBS_KEY, run_id)

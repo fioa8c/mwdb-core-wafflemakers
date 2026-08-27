@@ -50,6 +50,10 @@ def _ensure_schema_once():
                 logger.warning(
                     "wpsandbox: could not ensure attribute definitions: %s", e
                 )
+                try:
+                    _db().session.rollback()
+                except Exception:
+                    pass
 
 
 def _now():
@@ -90,7 +94,7 @@ class WpSandboxRunListResource(Resource):
             schema: {type: string}
             required: true
         responses:
-          200: {description: Runs, newest first}
+          200: {description: "Runs, newest first"}
           404: {description: Sample not found or unauthorized}
         """
         _ensure_schema_once()
@@ -261,9 +265,21 @@ class WpSandboxRunResource(Resource):
         for key in ("started_at", "finished_at"):
             if key in body:
                 setattr(run, key, _parse_iso(body[key], key))
-        for key in ("error", "report_blob_id", "sandbox_id"):
-            if key in body:
-                setattr(run, key, body[key])
+        if "report_blob_id" in body:
+            value = body["report_blob_id"]
+            if value is not None and not (isinstance(value, str) and len(value) <= 64):
+                raise BadRequest("Invalid report_blob_id")
+            run.report_blob_id = value
+        if "sandbox_id" in body:
+            value = body["sandbox_id"]
+            if value is not None and not (isinstance(value, str) and len(value) <= 128):
+                raise BadRequest("Invalid sandbox_id")
+            run.sandbox_id = value
+        if "error" in body:
+            value = body["error"]
+            if value is not None and not isinstance(value, str):
+                raise BadRequest("Invalid error")
+            run.error = value[:4096] if isinstance(value, str) else value
         _db().session.commit()
         return jsonify(_run_json(run))
 
@@ -294,7 +310,7 @@ class WpSandboxRunResource(Resource):
         if run.status != "queued":
             raise Conflict("Only queued runs can be cancelled")
         removed = get_queue().remove(run.id)
-        if removed == 0:
+        if removed == 0 and run.effective_status()[0] != "failed":
             raise Conflict("Run was already picked up by the worker")
         _db().session.delete(run)
         _db().session.commit()

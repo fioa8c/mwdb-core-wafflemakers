@@ -127,6 +127,15 @@ def test_post_after_terminal_run_is_allowed(client, app):
     assert client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}).status_code == 202
 
 
+def test_post_after_stale_queued_run_is_allowed(client, app):
+    run_id = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}).get_json()["run_id"]
+    row = app.db.session.get(WpSandboxRun, run_id)
+    row.created_at = datetime.now(timezone.utc) - timedelta(seconds=300 + 600 + 1)
+    app.db.session.commit()
+    r = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
+    assert r.status_code == 202, r.data
+
+
 # --- GET list -----------------------------------------------------------
 
 def test_get_lists_runs_newest_first(client, app):
@@ -182,6 +191,20 @@ def test_delete_conflict_when_worker_already_picked_up(client, app):
     assert client.get("/api/wpsandbox/run/" + run_id).status_code == 200
 
 
+def test_delete_stale_queued_run_succeeds_even_if_missing_from_redis(client, app):
+    run_id = client.post(
+        "/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"}
+    ).get_json()["run_id"]
+    row = app.db.session.get(WpSandboxRun, run_id)
+    row.created_at = datetime.now(timezone.utc) - timedelta(seconds=300 + 600 + 1)
+    app.db.session.commit()
+    # Simulate the id having already fallen out of the queue.
+    app.redis.lrem("wpsandbox:jobs", 0, run_id)
+    r = client.delete("/api/wpsandbox/run/" + run_id)
+    assert r.status_code == 200, r.data
+    assert r.get_json() == {"cancelled": run_id}
+
+
 # --- POST enqueue failure ---------------------------------------------------
 
 class _FailingQueue:
@@ -206,6 +229,31 @@ def test_post_503_and_marks_failed_when_enqueue_raises(client, app, monkeypatch)
     monkeypatch.setattr(res, "get_queue", lambda: JobQueue(app.redis))
     r2 = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
     assert r2.status_code == 202, r2.data
+
+
+# --- schema/attribute-definition failure handling ------------------------
+
+def test_post_continues_and_rolls_back_when_attribute_definitions_fail(client, app, monkeypatch):
+    from wpsandbox import resource as res
+
+    def boom():
+        raise RuntimeError("attrs down")
+
+    monkeypatch.setattr(res.attributes, "ensure_attribute_definitions", boom)
+    res._schema_ready = False
+
+    rollback_calls = []
+    original_rollback = res._db().session.rollback
+
+    def recording_rollback():
+        rollback_calls.append(True)
+        return original_rollback()
+
+    monkeypatch.setattr(res._db().session, "rollback", recording_rollback)
+
+    r = client.post("/api/wpsandbox/" + "ab" * 32, json={"mode": "webroot"})
+    assert r.status_code == 202, r.data
+    assert rollback_calls == [True]
 
 
 # --- run item -----------------------------------------------------------
@@ -246,6 +294,22 @@ def test_patch_rejects_bad_status(client, app):
     run_id = _create(client)
     app.user.login = "wpsandbox-worker"
     assert client.patch(f"/api/wpsandbox/run/{run_id}", json={"status": "weird"}).status_code == 400
+
+
+def test_patch_rejects_oversized_report_blob_id(client, app):
+    run_id = _create(client)
+    app.user.login = "wpsandbox-worker"
+    r = client.patch(f"/api/wpsandbox/run/{run_id}", json={"report_blob_id": "x" * 65})
+    assert r.status_code == 400, r.data
+    assert "report_blob_id" in r.get_json()["message"]
+
+
+def test_patch_rejects_non_string_sandbox_id(client, app):
+    run_id = _create(client)
+    app.user.login = "wpsandbox-worker"
+    r = client.patch(f"/api/wpsandbox/run/{run_id}", json={"sandbox_id": 123})
+    assert r.status_code == 400, r.data
+    assert "sandbox_id" in r.get_json()["message"]
 
 
 def test_delete_forbidden_for_other_user_without_manage_users(client, app):

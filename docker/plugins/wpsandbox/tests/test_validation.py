@@ -42,7 +42,19 @@ def test_plugin_mode_requires_zip_name():
     ({"mode": "webroot", "path": "....//....//x.php"}, "root"),
     ({"mode": "webroot", "path": "../x.php"}, "root"),
     ({"mode": "webroot", "path": "wp-content/../../x.php"}, "root"),
+    ({"mode": "webroot", "path": "wp-content/uploads/a;curl x|sh.php"}, "letters"),
+    ({"mode": "webroot", "path": "x\x00.php"}, "letters"),
+    ({"mode": "webroot", "path": "a b.php"}, "letters"),
+    ({"mode": "webroot", "body": "x" * 65537}, "bytes"),
+    ({"mode": "webroot", "query": ["a"]}, "string"),
 ])
 def test_rejects(body, msg):
     with pytest.raises(ValidationError, match=msg):
         normalize_params(body, max_timeout=300, sample_sha256=SHA, sample_name="x.php")
+
+
+def test_accepts_path_with_allowed_characters_only():
+    _, p = normalize_params(
+        {"mode": "webroot", "path": "wp-content/uploads/ok_file-1.php"},
+        max_timeout=300, sample_sha256=SHA, sample_name="x.php")
+    assert p["path"] == "wp-content/uploads/ok_file-1.php"
