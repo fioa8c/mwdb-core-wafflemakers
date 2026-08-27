@@ -4,7 +4,7 @@
 
 **Goal:** Add the `wpsandbox` MWDB plugin backend: a `wpsandbox_run` table, the REST resources that create/list/poll/cancel runs and let the worker update them, a Redis job queue, and attribute definitions — all testable without a running MWDB stack.
 
-**Architecture:** Python package at `docker/plugins/wpsandbox/` following the `phpdeobf` layout (`__init__.py` entrypoint, `resource.py`, `tests/` with the stubbed-`mwdb` conftest). New pieces vs. `phpdeobf`: a SQLAlchemy model (`model.py`) created idempotently at entrypoint, a tiny queue module (`queue.py`) over `redis`, config helpers (`config.py`), and request validation (`validation.py`) kept separate so it is unit-testable with plain dicts.
+**Architecture:** Python package at `docker/plugins/wpsandbox/` following the `phpdeobf` layout (`__init__.py` entrypoint, `resource.py`, `tests/` with the stubbed-`mwdb` conftest). New pieces vs. `phpdeobf`: a SQLAlchemy model (`model.py`) created idempotently at entrypoint, a tiny job-queue module (`jobs.py` — not `queue.py`, which would shadow the stdlib) over `redis`, config helpers (`config.py`), and request validation (`validation.py`) kept separate so it is unit-testable with plain dicts.
 
 **Tech Stack:** Python ≥3.10, Flask-RESTful `Resource` (via `mwdb.core.service`), SQLAlchemy 1.4 models on `mwdb.model.db`, `redis` 4.x (already an MWDB dependency), pytest + `fakeredis` for tests.
 
@@ -31,7 +31,7 @@ docker/plugins/wpsandbox/
 ├── config.py            # env accessors
 ├── model.py             # WpSandboxRun + ensure_schema() + to_dict()/effective_status()
 ├── validation.py        # normalize_params(), ValidationError
-├── queue.py             # JobQueue (push/remove) over redis
+├── jobs.py              # JobQueue (push/remove) over redis
 ├── resource.py          # WpSandboxRunListResource, WpSandboxRunResource
 ├── README.md
 └── tests/
@@ -39,7 +39,7 @@ docker/plugins/wpsandbox/
     ├── conftest.py      # stubs mwdb.* like phpdeobf; provides `app` fixture
     ├── test_validation.py
     ├── test_model.py
-    ├── test_queue.py
+    ├── test_jobs.py
     └── test_resource.py
 ```
 
@@ -483,20 +483,20 @@ git commit -m "wpsandbox plugin: run model with idempotent schema creation"
 ### Task 3: Redis job queue
 
 **Files:**
-- Create: `docker/plugins/wpsandbox/queue.py`
-- Test: `docker/plugins/wpsandbox/tests/test_queue.py`
+- Create: `docker/plugins/wpsandbox/jobs.py`
+- Test: `docker/plugins/wpsandbox/tests/test_jobs.py`
 
 **Interfaces:**
 - Produces: `class JobQueue(client=None)` — `push(run_id: str) -> None` (`RPUSH`), `remove(run_id: str) -> int` (`LREM` all), `pending() -> list[str]`; `get_queue() -> JobQueue` (module singleton built from `config.redis_url()`). Tests inject `fakeredis.FakeRedis()`.
 
 - [ ] **Step 1: Write the failing test**
 
-`docker/plugins/wpsandbox/tests/test_queue.py`:
+`docker/plugins/wpsandbox/tests/test_jobs.py`:
 ```python
 import fakeredis
 
 from wpsandbox.config import JOBS_KEY
-from wpsandbox.queue import JobQueue
+from wpsandbox.jobs import JobQueue
 
 
 def test_push_appends_in_order():
@@ -518,12 +518,12 @@ def test_remove_deletes_all_occurrences():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd docker/plugins/wpsandbox && python -m pytest tests/test_queue.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'wpsandbox.queue'`
+Run: `cd docker/plugins/wpsandbox && python -m pytest tests/test_jobs.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'wpsandbox.jobs'`
 
 - [ ] **Step 3: Implement**
 
-`docker/plugins/wpsandbox/queue.py`:
+`docker/plugins/wpsandbox/jobs.py`:
 ```python
 """Redis-backed FIFO of run ids. The worker BLPOPs the same key."""
 import redis
@@ -557,13 +557,13 @@ def get_queue() -> JobQueue:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd docker/plugins/wpsandbox && python -m pytest tests/test_queue.py -v`
+Run: `cd docker/plugins/wpsandbox && python -m pytest tests/test_jobs.py -v`
 Expected: 2 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docker/plugins/wpsandbox/queue.py docker/plugins/wpsandbox/tests/test_queue.py
+git add docker/plugins/wpsandbox/jobs.py docker/plugins/wpsandbox/tests/test_jobs.py
 git commit -m "wpsandbox plugin: redis job queue"
 ```
 
@@ -596,7 +596,7 @@ import pytest
 from flask import Flask
 
 from wpsandbox.model import WpSandboxRun, ensure_schema
-from wpsandbox.queue import JobQueue
+from wpsandbox.jobs import JobQueue
 
 
 @pytest.fixture
@@ -756,7 +756,7 @@ from mwdb.resources import requires_authorization
 
 from . import config, logger
 from .model import TERMINAL, WpSandboxRun, ensure_schema
-from .queue import get_queue as _get_queue
+from .jobs import get_queue as _get_queue
 from .validation import ValidationError, normalize_params
 
 # Re-exported names so tests can monkeypatch them on this module.
