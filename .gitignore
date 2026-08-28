@@ -19,8 +19,10 @@ postgres-vars.env
 docker/plugins/*/
 !docker/plugins/yarax_regex/
 !docker/plugins/phpdeobf/
+!docker/plugins/wpsandbox/
 docker/mail_templates/
 tests/frontend/cypress/videos/
 tests/frontend/cypress/screenshots/
 build/
 dist/
+.claude/
