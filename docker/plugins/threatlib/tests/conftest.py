@@ -105,6 +105,7 @@ def schema():
     _Session.query(model.Threat).delete()
     _Session.execute(sa.text("DELETE FROM object"))
     _Session.commit()
+    _Session.remove()
 
 
 @pytest.fixture
