@@ -273,15 +273,49 @@ docker compose -f docker-compose-prod.yml exec postgres \
 ## Threat library sync rollout
 
 1. Create a deploy key with write access to `Automattic/jetpack-threat-library`
-   on github.a8c.com; place the private key at `./secrets/threatlib_deploy_key`
-   (mode 600, git-ignored).
+   on github.a8c.com and pin the host key. The sidecar runs as `nobody`
+   (uid 65534), so the key must be owned by that uid:
+
+   ```bash
+   mkdir -p ./secrets
+   # place the private key at ./secrets/threatlib_deploy_key, then:
+   sudo chown 65534:65534 ./secrets/threatlib_deploy_key
+   sudo chmod 600 ./secrets/threatlib_deploy_key
+   ssh-keyscan github.a8c.com > ./secrets/threatlib_known_hosts
+   ```
+
+   Both files stay out of git. With `MWDB_THREATLIB_KNOWN_HOSTS` set (the
+   prod compose does) ssh refuses any host key not in that file.
 2. `docker compose -f docker-compose-prod.yml up -d --build threatlib-sync`
-   with `MWDB_THREATLIB_PUSH=0` (the default). The first run migrates existing
-   `jpop_threat_name` samples, ingests everything the April import missed and
-   writes the export into the `threatlib-repo` volume without pushing.
-3. Review the diff: `docker compose -f docker-compose-prod.yml exec threatlib-sync
-   git -C /data/repo status --short | head`. Expected: only `.mwdb-threatlib.json`
-   added. Investigate anything else before continuing.
+   with `MWDB_THREATLIB_PUSH=0` (the default). The sync acts as the admin
+   user (`MWDB_THREATLIB_USER` overrides it; the container exits with code 2
+   if the user does not exist). The first run ingests every repo path under
+   the four owned dirs: files already in MWDB from the April import are
+   de-duplicated by sha256 and re-linked under their exact repo paths, new
+   files are uploaded, and the export is written into the `threatlib-repo`
+   volume without pushing. It does not read the April import's comments; the
+   READMEs come from the repo's `README.md` files.
+
+   **Sharing:** every ingested sample, including April-imported ones
+   re-matched by sha256, is shared with `MWDB_THREATLIB_SHARE_WITH`
+   (default `public`, i.e. every logged-in researcher). Set it to an empty
+   string to share with nobody (admin-only) before the first run if that is
+   not wanted.
+3. Review the diff. With `PUSH=0` the sync commits locally, so compare the
+   local commit with the remote:
+
+   ```bash
+   docker compose -f docker-compose-prod.yml exec threatlib-sync \
+     git -C /data/repo diff --stat origin/trunk HEAD
+   ```
+
+   Expected: only `.mwdb-threatlib.json` added. Investigate anything else
+   before continuing. Also check the logs for `preserved` warnings: those
+   paths could not be ingested and are kept in the repo as they are.
+
+   While `PUSH=0` the remote has no manifest, so every run is a first run:
+   anything unlinked in MWDB in the meantime is re-imported from the repo on
+   the next run. Keep this window short.
 4. `MWDB_THREATLIB_PUSH=1 docker compose -f docker-compose-prod.yml up -d threatlib-sync`.
    The first pushed commit adds only the manifest.
 5. Announce that MWDB is canonical for `threats/`, `for-later-review/`,

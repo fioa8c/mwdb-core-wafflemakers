@@ -88,6 +88,8 @@ def test_upload_creates_threat_links_and_mirrors(admin_session, name):
     assert admin_session.get_sample(sha_a)["sha256"] == sha_a
     tags = [t["tag"] for t in admin_session.get_tags(sha_a)]
     assert "threats" not in tags
+    attrs = admin_session.get_attributes(sha_a)["attributes"]
+    assert not any(a["key"] == "jpop_threat_name" and a["value"] == name for a in attrs)
 
 
 def test_validation_over_http(admin_session, name):

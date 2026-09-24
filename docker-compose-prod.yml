@@ -58,6 +58,7 @@ services:
       - MWDB_ENABLE_HOOKS=0
       - MWDB_THREATLIB_REPO_URL=git@github.a8c.com:Automattic/jetpack-threat-library.git
       - MWDB_THREATLIB_DEPLOY_KEY=/run/secrets/threatlib_deploy_key
+      - MWDB_THREATLIB_KNOWN_HOSTS=/run/secrets/threatlib_known_hosts
       - MWDB_THREATLIB_SYNC_INTERVAL=900
       # Rollout step 1: keep at 0 until the first export diff has been reviewed.
       - MWDB_THREATLIB_PUSH=${MWDB_THREATLIB_PUSH:-0}
@@ -65,6 +66,7 @@ services:
       - mwdb-uploads:/app/uploads
       - threatlib-repo:/data/repo
       - ./secrets/threatlib_deploy_key:/run/secrets/threatlib_deploy_key:ro
+      - ./secrets/threatlib_known_hosts:/run/secrets/threatlib_known_hosts:ro
 
   mwdb-web:
     build:
