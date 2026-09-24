@@ -1,11 +1,37 @@
-# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf) and their sidecars
+# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf, threatlib) and their sidecars
 services:
   mwdb:
     environment:
-      MWDB_PLUGINS: "yarax_regex,phpdeobf"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib"
       MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
   phpdeobf:
     build:
       context: ./docker/phpdeobf
       dockerfile: Dockerfile.server
     restart: unless-stopped
+  threatlib-sync:
+    build:
+      context: .
+      dockerfile: docker/threatlib-sync/Dockerfile
+    depends_on:
+      mwdb:
+        condition: service_healthy
+    restart: unless-stopped
+    env_file:
+      - mwdb-vars.env
+    environment:
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib"
+      MWDB_ENABLE_HOOKS: "0"
+      # Dev default: sync against a local bare repo mounted at /data/origin.git.
+      # Create it with:  git init --bare -b trunk ./dev-threatlib-origin.git
+      MWDB_THREATLIB_REPO_URL: "${MWDB_THREATLIB_REPO_URL:-/data/origin.git}"
+      MWDB_THREATLIB_SYNC_INTERVAL: "${MWDB_THREATLIB_SYNC_INTERVAL:-60}"
+      MWDB_THREATLIB_PUSH: "${MWDB_THREATLIB_PUSH:-1}"
+      MWDB_THREATLIB_DEPLOY_KEY: "${MWDB_THREATLIB_DEPLOY_KEY:-}"
+    volumes:
+      - mwdb-uploads:/app/uploads
+      - threatlib-repo:/data/repo
+      - ./dev-threatlib-origin.git:/data/origin.git
+      - ./docker/plugins:/app/plugins
+volumes:
+  threatlib-repo:

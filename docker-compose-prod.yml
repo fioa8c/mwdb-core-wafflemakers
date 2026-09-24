@@ -33,7 +33,7 @@ services:
       # In-tree plugins under docker/plugins/ get pip-installed into
       # site-packages, where MWDB's local_plugins_autodiscover scan of
       # /app/plugins/ won't find them. Name them explicitly here.
-      - MWDB_PLUGINS=yarax_regex,phpdeobf
+      - MWDB_PLUGINS=yarax_regex,phpdeobf,threatlib
       - MWDB_PHPDEOBF_URL=http://phpdeobf:8080
     volumes:
       - mwdb-uploads:/app/uploads
@@ -43,6 +43,28 @@ services:
       context: ./docker/phpdeobf
       dockerfile: Dockerfile.server
     restart: unless-stopped
+
+  threatlib-sync:
+    build:
+      context: .
+      dockerfile: docker/threatlib-sync/Dockerfile
+    depends_on:
+      - mwdb
+    restart: unless-stopped
+    env_file:
+      - mwdb-vars.env
+    environment:
+      - MWDB_PLUGINS=yarax_regex,phpdeobf,threatlib
+      - MWDB_ENABLE_HOOKS=0
+      - MWDB_THREATLIB_REPO_URL=git@github.a8c.com:Automattic/jetpack-threat-library.git
+      - MWDB_THREATLIB_DEPLOY_KEY=/run/secrets/threatlib_deploy_key
+      - MWDB_THREATLIB_SYNC_INTERVAL=900
+      # Rollout step 1: keep at 0 until the first export diff has been reviewed.
+      - MWDB_THREATLIB_PUSH=${MWDB_THREATLIB_PUSH:-0}
+    volumes:
+      - mwdb-uploads:/app/uploads
+      - threatlib-repo:/data/repo
+      - ./secrets/threatlib_deploy_key:/run/secrets/threatlib_deploy_key:ro
 
   mwdb-web:
     build:
@@ -74,4 +96,5 @@ services:
 volumes:
   mwdb-postgres:
   mwdb-uploads:
+  threatlib-repo:
   letsencrypt:

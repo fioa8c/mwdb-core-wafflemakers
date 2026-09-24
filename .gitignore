@@ -28,3 +28,7 @@ dist/
 
 # superpowers SDD scratch workspaces
 .superpowers/
+
+# threatlib-sync dev/prod local state
+dev-threatlib-origin.git/
+secrets/

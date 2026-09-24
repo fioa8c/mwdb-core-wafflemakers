@@ -270,6 +270,25 @@ docker compose -f docker-compose-prod.yml exec postgres \
   psql -U mwdb -d mwdb -c "SELECT pg_size_pretty(pg_database_size('mwdb'));"
 ```
 
+## Threat library sync rollout
+
+1. Create a deploy key with write access to `Automattic/jetpack-threat-library`
+   on github.a8c.com; place the private key at `./secrets/threatlib_deploy_key`
+   (mode 600, git-ignored).
+2. `docker compose -f docker-compose-prod.yml up -d --build threatlib-sync`
+   with `MWDB_THREATLIB_PUSH=0` (the default). The first run migrates existing
+   `jpop_threat_name` samples, ingests everything the April import missed and
+   writes the export into the `threatlib-repo` volume without pushing.
+3. Review the diff: `docker compose -f docker-compose-prod.yml exec threatlib-sync
+   git -C /data/repo status --short | head`. Expected: only `.mwdb-threatlib.json`
+   added. Investigate anything else before continuing.
+4. `MWDB_THREATLIB_PUSH=1 docker compose -f docker-compose-prod.yml up -d threatlib-sync`.
+   The first pushed commit adds only the manifest.
+5. Announce that MWDB is canonical for `threats/`, `for-later-review/`,
+   `webshells/`, `escalated_issues_samples/`. Hand-made PRs still merge safely
+   (ingest runs first); after a quiet period mark those dirs as generated in
+   the repo README.
+
 ## Security notes
 
 - **Firewall:** Only ports 80 and 443 should be open. PostgreSQL (5432), Redis (6379), and gunicorn (8080) are internal-only (no `ports:` exposed to host in the compose file).
