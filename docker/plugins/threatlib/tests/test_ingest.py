@@ -145,3 +145,21 @@ def test_errors_are_counted_and_do_not_abort(repo, store, monkeypatch):
     # the next run will pick it up. Everything else landed.
     assert service.get_threat("wf-1") is None
     assert service.get_threat("FIO-1") is not None
+
+
+def test_link_failure_rolls_back_the_threat_it_created(repo, store, monkeypatch):
+    real = service.link_sample
+
+    def flaky(threat, file_obj, rel_path, **kwargs):
+        if rel_path == "x.php":
+            raise RuntimeError("link failed")
+        return real(threat, file_obj, rel_path, **kwargs)
+
+    monkeypatch.setattr(service, "link_sample", flaky)
+    stats = ingest(repo, None, store)
+    assert stats.errors == 1
+    # the threat created just before the failing link_sample call must not
+    # survive: it was created and linked in the same per-file transaction.
+    assert service.get_threat("wf-1") is None
+    assert stats.new_threats == 6
+    assert service.get_threat("FIO-1") is not None

@@ -68,41 +68,53 @@ def _iter_files(repo_path: Path):
             yield path
 
 
-def _get_or_create_threat(category, name, flat, stats):
+def _get_or_create_threat(category, name, flat):
+    """Returns (threat, created). Does not commit or touch stats: the caller
+    only counts it once the whole per-file transaction has committed."""
     threat = service.get_threat(name)
     if threat is None:
         threat = service.create_threat(name, category, flat=flat, commit=False)
-        stats.new_threats += 1
-    return threat
+        return threat, True
+    return threat, False
 
 
-def _ingest_sample(path, category, name, rel_path, flat, store, stats):
+def _ingest_sample(path, category, name, rel_path, flat, store):
+    """Returns (new_threat, new_file). Stores the file BEFORE creating the
+    threat: both `MwdbStore.get_or_create` and `FakeStore.get_or_create`
+    commit the current session internally (they only durably persist the
+    File row, but a commit flushes everything pending on the session). If
+    the threat were created first and `link_sample` then failed, the
+    caller's rollback would have nothing left to undo and an orphan,
+    zero-sample threat would survive. Creating the threat only once the
+    file is safely stored keeps the threat-creation + link in one
+    transaction that a later failure can still roll back in full."""
     data = path.read_bytes()
-    threat = _get_or_create_threat(category, name, flat, stats)
     if len(data) == 0:
         file_obj = None
     else:
         file_obj, _ = store.get_or_create(
             posixpath.basename(rel_path), io.BytesIO(data)
         )
-    _, created = service.link_sample(threat, file_obj, rel_path, commit=False)
-    if created:
-        stats.new_files += 1
+    threat, new_threat = _get_or_create_threat(category, name, flat)
+    _, new_file = service.link_sample(threat, file_obj, rel_path, commit=False)
+    return new_threat, new_file
 
 
-def _ingest_readme(path, category, name, threat_dir, manifest, stats):
+def _ingest_readme(path, category, name, threat_dir, manifest):
+    """Returns (new_threat, updated)."""
     data = path.read_bytes()
     new_hash = sha256_bytes(data)
     old_hash = manifest.readmes.get(threat_dir) if manifest else None
     if new_hash == old_hash:
-        return
-    threat = _get_or_create_threat(category, name, False, stats)
+        return False, False
+    threat, new_threat = _get_or_create_threat(category, name, False)
     current_hash = (
         None if threat.readme is None else sha256_bytes(threat.readme.encode("utf-8"))
     )
     if threat.readme is None or current_hash == old_hash:
         service.set_readme(threat, data.decode("utf-8", errors="replace"), commit=False)
-        stats.readmes_updated += 1
+        return new_threat, True
+    return new_threat, False
 
 
 def _clear_deleted_readme(threat_dir, old_hash, stats):
@@ -150,13 +162,29 @@ def ingest(
                 if is_readme:
                     threat_dir = f"{category}/{name}"
                     seen_readmes.add(threat_dir)
-                    _ingest_readme(path, category, name, threat_dir, manifest, stats)
+                    new_threat, readme_updated = _ingest_readme(
+                        path, category, name, threat_dir, manifest
+                    )
+                    new_file = False
                 else:
                     seen_files.add(key)
                     if manifest is not None and key in manifest.files:
                         continue
-                    _ingest_sample(path, category, name, rel_path, flat, store, stats)
+                    new_threat, new_file = _ingest_sample(
+                        path, category, name, rel_path, flat, store
+                    )
+                    readme_updated = False
                 db.session.commit()
+                # Only count effects of a file whose transaction actually
+                # committed, so a rolled-back threat/link/readme is never
+                # counted (see _ingest_sample's docstring for why the order
+                # of operations matters here).
+                if new_threat:
+                    stats.new_threats += 1
+                if new_file:
+                    stats.new_files += 1
+                if readme_updated:
+                    stats.readmes_updated += 1
             except ValidationError as e:
                 db.session.rollback()
                 logger.warning("threatlib ingest: skipping %s: %s", key, e.message)
