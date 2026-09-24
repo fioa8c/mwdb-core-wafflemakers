@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import posixpath
+
 from flask import g, jsonify, request
 from werkzeug.exceptions import BadRequest, Conflict, NotFound
 
 from mwdb.core.capabilities import Capabilities
+from mwdb.core.hooks import hooks
 from mwdb.core.service import Resource
-from mwdb.model import db
-from mwdb.resources import requires_authorization, requires_capabilities
+from mwdb.model import File, db
+from mwdb.model.file import EmptyFileError
+from mwdb.resources import (
+    get_shares_for_upload,
+    requires_authorization,
+    requires_capabilities,
+)
 
 from . import service
-from .model import Threat, iso
-from .validation import ValidationError, validate_category
+from .model import Threat, ThreatSample, iso
+from .validation import ValidationError, validate_category, validate_rel_path
 
 MAX_PER_PAGE = 200
 
@@ -194,3 +202,160 @@ class ThreatResource(Resource):
         threat = _get_or_404(name)
         service.delete_threat(threat)
         return jsonify({"deleted": name})
+
+
+def _threat_response(threat: Threat) -> dict:
+    return threat_dict(threat, service.sample_count(threat), visible_samples(threat))
+
+
+class ThreatSampleListResource(Resource):
+    @requires_authorization
+    @requires_capabilities(Capabilities.adding_files)
+    def post(self, name):
+        """
+        ---
+        summary: Link an existing sample to a threat
+        security:
+            - bearerAuth: []
+        tags:
+            - threatlib
+        """
+        threat = _get_or_404(name)
+        body = _json_body()
+        sha256 = body.get("sha256")
+        if not isinstance(sha256, str):
+            raise BadRequest("'sha256' is required")
+        file_obj = File.access(sha256)
+        if file_obj is None:
+            raise NotFound("Sample not found or you don't have access to it")
+        try:
+            service.link_sample(threat, file_obj, body.get("rel_path"))
+        except ValidationError as e:
+            raise BadRequest(e.message)
+        except service.PathConflict:
+            raise Conflict("rel_path already used by another sample in this threat")
+        return jsonify(_threat_response(threat))
+
+
+class ThreatSampleResource(Resource):
+    @requires_authorization
+    @requires_capabilities(Capabilities.adding_files)
+    def delete(self, name, sha256):
+        """
+        ---
+        summary: Unlink one path of a sample from a threat
+        security:
+            - bearerAuth: []
+        tags:
+            - threatlib
+        """
+        threat = _get_or_404(name)
+        rel_path = request.args.get("rel_path")
+        if not rel_path:
+            raise BadRequest("'rel_path' query parameter is required")
+        try:
+            rel_path = validate_rel_path(rel_path)
+        except ValidationError as e:
+            raise BadRequest(e.message)
+        link = db.session.get(ThreatSample, (threat.id, rel_path))
+        if link is None or link.object_id is None:
+            raise NotFound("Link not found")
+        file_obj = service._load_file(link.object_id)
+        if file_obj is None or file_obj.dhash != sha256.lower():
+            raise NotFound("Link not found")
+        service.unlink_sample(threat, rel_path)
+        return jsonify(_threat_response(threat))
+
+
+class ThreatUploadResource(Resource):
+    @requires_authorization
+    @requires_capabilities(Capabilities.adding_files)
+    def post(self):
+        """
+        ---
+        summary: Upload one or more files into a threat, creating it if needed
+        description: |
+            multipart/form-data with fields: threat (name), category + readme
+            (only used when the threat does not exist yet), files (repeatable),
+            rel_paths (repeatable, parallel to files), upload_as (default "*").
+        security:
+            - bearerAuth: []
+        tags:
+            - threatlib
+        """
+        form = request.form
+        name = form.get("threat")
+        files = request.files.getlist("files")
+        rel_paths = form.getlist("rel_paths")
+        if not files:
+            raise BadRequest("At least one file is required")
+        if len(files) != len(rel_paths):
+            raise BadRequest("'rel_paths' must have one entry per file")
+        try:
+            rel_paths = [validate_rel_path(p) for p in rel_paths]
+        except ValidationError as e:
+            raise BadRequest(e.message)
+
+        threat = service.get_threat(name) if isinstance(name, str) else None
+        if threat is None:
+            category = form.get("category")
+            if not category:
+                raise BadRequest("'category' is required when creating a new threat")
+            try:
+                threat = service.create_threat(
+                    name,
+                    category,
+                    readme=form.get("readme") or None,
+                    created_by=g.auth_user.login,
+                )
+            except ValidationError as e:
+                raise BadRequest(e.message)
+
+        share_with = get_shares_for_upload(form.get("upload_as", "*"))
+        results = []
+        for storage, rel_path in zip(files, rel_paths):
+            try:
+                file_obj, is_new = File.get_or_create(
+                    file_name=posixpath.basename(rel_path),
+                    file_stream=storage.stream,
+                    share_3rd_party=False,
+                    share_with=share_with,
+                )
+            except EmptyFileError:
+                results.append(
+                    {
+                        "rel_path": rel_path,
+                        "sha256": None,
+                        "status": "rejected",
+                        "reason": "empty file",
+                    }
+                )
+                continue
+            db.session.commit()
+            if is_new:
+                hooks.on_created_file(file_obj)
+                hooks.on_created_object(file_obj)
+            else:
+                hooks.on_reuploaded_file(file_obj)
+                hooks.on_reuploaded_object(file_obj)
+            file_obj.release_after_upload()
+            try:
+                service.link_sample(threat, file_obj, rel_path)
+            except service.PathConflict:
+                results.append(
+                    {
+                        "rel_path": rel_path,
+                        "sha256": file_obj.dhash,
+                        "status": "rejected",
+                        "reason": "rel_path already used by another sample in this threat",
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "rel_path": rel_path,
+                    "sha256": file_obj.dhash,
+                    "status": "new" if is_new else "existing",
+                }
+            )
+        return jsonify({"threat": _threat_response(threat), "results": results})
