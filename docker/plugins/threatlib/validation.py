@@ -25,7 +25,7 @@ def validate_name(name) -> str:
         raise ValidationError(f"Threat name longer than {MAX_NAME_LEN} characters")
     if name in (".", ".."):
         raise ValidationError("Threat name cannot be '.' or '..'")
-    if not NAME_RE.match(name):
+    if not NAME_RE.fullmatch(name):
         raise ValidationError("Threat name may contain only A-Z a-z 0-9 . _ -")
     return name
 

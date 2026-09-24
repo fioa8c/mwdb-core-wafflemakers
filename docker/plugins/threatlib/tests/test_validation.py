@@ -13,7 +13,7 @@ def test_valid_names(name):
     assert validate_name(name) == name
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a\\b", "ü", "x" * 256, None])
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a\\b", "ü", "x" * 256, None, "abc\n"])
 def test_invalid_names(name):
     with pytest.raises(ValidationError):
         validate_name(name)
