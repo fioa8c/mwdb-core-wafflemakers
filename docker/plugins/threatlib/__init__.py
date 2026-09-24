@@ -36,8 +36,11 @@ def entrypoint(app_context: "PluginAppContext") -> None:
 
 
 def _register_resources(app_context: "PluginAppContext") -> None:
-    # Filled in by later tasks (resource registration).
-    return None
+    from .resource import ThreatListResource, ThreatResource
+
+    app_context.register_resource(ThreatListResource, "/threatlib/threat")
+    app_context.register_resource(ThreatResource, "/threatlib/threat/<name>")
+    logger.info("threatlib: registered /api/threatlib/threat resources")
 
 
 __plugin_entrypoint__ = entrypoint
