@@ -16,6 +16,10 @@ from .store import ObjectStore
 logger = logging.getLogger("mwdb.plugin.threatlib.sync")
 
 
+class ExportError(Exception):
+    pass
+
+
 @dataclass
 class ExportStats:
     files_written: int = 0
@@ -40,12 +44,32 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def _check_for_collisions(repo_path: Path, threats: list[Threat]) -> None:
+    """Refuse to touch the tree when a nested threat's directory name would
+    collide with a preserved category-root regular file (e.g. a threat named
+    'README.md'): clear_owned only removes subdirectories of category dirs
+    (plus webshells root files), so such a threat's `mkdir` would raise
+    FileExistsError mid-export, leaving a half-cleared tree with no manifest.
+    """
+    collisions = [
+        f"{threat.category}/{threat.name}"
+        for threat in threats
+        if not threat.flat and (repo_path / threat.category / threat.name).is_file()
+    ]
+    if collisions:
+        raise ExportError(
+            "threat name(s) collide with existing category-root file(s): "
+            + ", ".join(repr(c) for c in collisions)
+        )
+
+
 def export(repo_path: Path, store: ObjectStore) -> tuple[Manifest, ExportStats]:
     repo_path = Path(repo_path)
+    threats = db.session.query(Threat).order_by(Threat.name).all()
+    _check_for_collisions(repo_path, threats)
     clear_owned(repo_path)
     manifest = Manifest()
     stats = ExportStats()
-    threats = db.session.query(Threat).order_by(Threat.name).all()
     for threat in threats:
         stats.threats += 1
         base = repo_path / threat.category

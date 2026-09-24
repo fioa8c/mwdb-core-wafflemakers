@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from threatlib import service
-from threatlib.sync.export import ExportStats, clear_owned, export
+from threatlib.sync.export import ExportError, ExportStats, clear_owned, export
 from threatlib.sync.ingest import ingest
 from threatlib.sync.manifest import MANIFEST_NAME, load_manifest, sha256_bytes
 
@@ -59,6 +61,20 @@ def test_export_writes_layout_and_manifest(tmp_path, store):
     }
     assert manifest.readmes == {"threats/FIO-1": sha256_bytes(b"# FIO-1\n")}
     assert load_manifest(tmp_path).files == manifest.files
+
+
+def test_export_refuses_threat_name_colliding_with_root_file(tmp_path, store):
+    w(tmp_path, "threats/README.md", b"root")
+    t = service.create_threat("README.md", "threats")
+    service.link_sample(t, store.add(b"<?php a();"), "a.php")
+    other = service.create_threat("FIO-1", "threats")
+    service.link_sample(other, store.add(b"<?php b();"), "b.php")
+
+    with pytest.raises(ExportError):
+        export(tmp_path, store)
+
+    assert tree(tmp_path) == {"threats/README.md": b"root"}
+    assert not (tmp_path / MANIFEST_NAME).exists()
 
 
 def test_export_removes_stale_files(tmp_path, store):
