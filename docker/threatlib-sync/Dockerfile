@@ -31,7 +31,7 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       libpq5 postgresql-client libmagic1 libfuzzy2 git openssh-client \
+       libpq5 postgresql-client libmagic1 libfuzzy2 wget git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder --chown=nobody:nogroup /app /app
