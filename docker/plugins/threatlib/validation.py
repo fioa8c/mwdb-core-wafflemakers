@@ -25,6 +25,8 @@ def validate_name(name) -> str:
         raise ValidationError(f"Threat name longer than {MAX_NAME_LEN} characters")
     if name in (".", ".."):
         raise ValidationError("Threat name cannot be '.' or '..'")
+    if name.lower() == ".git":
+        raise ValidationError("Threat name cannot be '.git'")
     if not NAME_RE.fullmatch(name):
         raise ValidationError("Threat name may contain only A-Z a-z 0-9 . _ -")
     return name
@@ -46,6 +48,8 @@ def validate_rel_path(rel_path) -> str:
     segments = rel_path.split("/")
     if any(seg == ".." for seg in segments):
         raise ValidationError("rel_path cannot contain '..'")
+    if any(seg.lower() == ".git" for seg in segments):
+        raise ValidationError("rel_path cannot contain a '.git' segment")
     normalised = posixpath.normpath(rel_path)
     if normalised in (".", "") or normalised.startswith("../"):
         raise ValidationError("rel_path is invalid")

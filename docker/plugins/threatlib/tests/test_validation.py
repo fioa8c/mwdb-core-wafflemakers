@@ -13,7 +13,7 @@ def test_valid_names(name):
     assert validate_name(name) == name
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a\\b", "ü", "x" * 256, None, "abc\n"])
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a\\b", "ü", "x" * 256, None, "abc\n", ".git", ".GIT", ".Git"])
 def test_invalid_names(name):
     with pytest.raises(ValidationError):
         validate_name(name)
@@ -35,7 +35,11 @@ def test_valid_rel_paths(rel_path, expected):
 
 
 @pytest.mark.parametrize(
-    "rel_path", ["", "/abs.php", "../x.php", "a/../../x.php", "a//b.php", "a/", "x" * 1025, None, "a\\b.php"]
+    "rel_path",
+    [
+        "", "/abs.php", "../x.php", "a/../../x.php", "a//b.php", "a/", "x" * 1025, None, "a\\b.php",
+        ".git", ".git/config", "a/.GIT/hooks/x", "./.Git/x",
+    ],
 )
 def test_invalid_rel_paths(rel_path):
     with pytest.raises(ValidationError):

@@ -18,6 +18,8 @@ def app(monkeypatch):
         del sys.modules["threatlib.resource"]
     from threatlib import resource as resource_mod
 
+    monkeypatch.setattr(resource_mod, "_load_files", store.load_visible)
+
     flask_app = Flask(__name__)
     flask_app.add_url_rule(
         "/api/threatlib/threat",
@@ -131,3 +133,31 @@ def test_delete(client, app):
     assert client.delete("/api/threatlib/threat/FIO-1").status_code == 200
     assert service.get_threat("FIO-1") is None and f.tags == set()
     assert client.delete("/api/threatlib/threat/FIO-1").status_code == 404
+
+
+def test_get_omits_inaccessible_samples_but_counts_them(client, app):
+    from threatlib import service
+
+    t = service.create_threat("FIO-1", "threats")
+    visible = app.store.add(b"visible", "v.php")
+    hidden = app.store.add(b"hidden", "h.php")
+    service.link_sample(t, visible, "v.php")
+    service.link_sample(t, hidden, "h.php")
+    hidden.accessible = False
+    body = client.get("/api/threatlib/threat/FIO-1").get_json()
+    assert body["sample_count"] == 2
+    assert [s["sha256"] for s in body["samples"]] == [visible.sha256]
+
+
+def test_put_category_on_flat_threat_is_400(client, app):
+    from threatlib import service
+
+    t = service.create_threat("c99", "webshells", flat=True)
+    service.link_sample(t, app.store.add(b"x"), "c99.php")
+    r = client.put("/api/threatlib/threat/c99", json={"category": "threats"})
+    assert r.status_code == 400
+    assert service.get_threat("c99").category == "webshells"
+
+
+def test_create_rejects_dot_git_name(client):
+    assert client.post("/api/threatlib/threat", json={"name": ".GIT", "category": "threats"}).status_code == 400

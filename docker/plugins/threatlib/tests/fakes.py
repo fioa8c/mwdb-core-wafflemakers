@@ -55,6 +55,8 @@ class FakeFile:
         self.tags: set[str] = set()
         self.attributes: dict[str, set[str]] = {}
         self.calls: list[tuple] = []
+        # Whether the current (fake) user may see this object.
+        self.accessible = True
 
     # --- mwdb.model.Object API used by mirror.py ---
     def get_tag(self, tag):
@@ -87,7 +89,7 @@ class FakeFile:
         return existed
 
     def has_explicit_access(self, user):
-        return True
+        return self.accessible
 
     def read(self):
         return self.content
@@ -127,6 +129,19 @@ class FakeStore:
 
     def read(self, object_id):
         return self.by_id[object_id].content
+
+    def load_visible(self, object_ids):
+        """Stand-in for resource._load_files: {id: file} the user may see."""
+        return {
+            i: self.by_id[i]
+            for i in object_ids
+            if i in self.by_id and self.by_id[i].accessible
+        }
+
+    def access(self, sha256):
+        """Stand-in for File.access: None when missing or inaccessible."""
+        f = self.by_sha.get(sha256)
+        return f if f is not None and f.accessible else None
 
     def add(self, content: bytes, file_name: str = "x.php") -> FakeFile:
         obj, _ = self.get_or_create(file_name, io.BytesIO(content))

@@ -132,3 +132,37 @@ def test_list_threats_filters_and_counts(store):
 
     items, total = service.list_threats(page=2, per_page=2)
     assert total == 3 and [t.name for t, _ in items] == ["beta"]
+
+
+def test_flat_threat_takes_one_sample_named_after_it(store):
+    t = service.create_threat("c99", "webshells", flat=True)
+    f = store.add(b"<?php c99();")
+    for bad in ["sub/c99.php", "other.php", "c99/x.php"]:
+        with pytest.raises(ValidationError):
+            service.link_sample(t, f, bad)
+    service.link_sample(t, f, "c99.php")
+    # idempotent re-link is fine, a second link is not
+    assert service.link_sample(t, f, "c99.php")[1] is False
+    with pytest.raises(ValidationError):
+        service.link_sample(t, store.add(b"other"), "c99.txt")
+    assert service.sample_count(t) == 1
+
+
+def test_flat_threat_cannot_change_category(store):
+    t = service.create_threat("c99", "webshells", flat=True)
+    service.link_sample(t, store.add(b"x"), "c99.php")
+    with pytest.raises(ValidationError, match="flat threats cannot change category"):
+        service.set_category(t, "threats")
+    assert t.category == "webshells"
+    service.set_category(t, "webshells")  # no-op is allowed
+
+
+def test_readme_path_is_not_a_sample_of_a_dir_threat(store):
+    t = service.create_threat("FIO-1", "threats")
+    f = store.add(b"x")
+    for bad in ["README.md", "./README.md"]:
+        with pytest.raises(ValidationError):
+            service.link_sample(t, f, bad)
+    link, _ = service.link_sample(t, f, "sub/README.md")  # deeper is a sample
+    assert link.rel_path == "sub/README.md"
+    assert t.readme is None

@@ -34,18 +34,31 @@ def sample_dict(link, file_obj) -> dict:
     }
 
 
+def _load_files(object_ids) -> dict:
+    """{object_id: File} for the ids the current user may access, loaded in
+    one query with the access check done in SQL (monkeypatched by tests)."""
+    if not object_ids:
+        return {}
+    rows = (
+        db.session.query(File)
+        .filter(File.id.in_(sorted(object_ids)))
+        .filter(g.auth_user.has_access_to_object(File.id))
+        .all()
+    )
+    return {f.id: f for f in rows}
+
+
 def visible_samples(threat: Threat):
     """Links the current user may see: empty-file links always, object links
-    only when the user has explicit access to the object."""
+    only when the user has access to the object."""
+    links = sorted(threat.samples, key=lambda link: link.rel_path)
+    files = _load_files({link.object_id for link in links} - {None})
     result = []
-    for link in sorted(threat.samples, key=lambda link: link.rel_path):
+    for link in links:
         if link.object_id is None:
             result.append((link, None))
-            continue
-        file_obj = service._load_file(link.object_id)
-        if file_obj is None or not file_obj.has_explicit_access(g.auth_user):
-            continue
-        result.append((link, file_obj))
+        elif link.object_id in files:
+            result.append((link, files[link.object_id]))
     return result
 
 
@@ -260,8 +273,8 @@ class ThreatSampleResource(Resource):
         link = db.session.get(ThreatSample, (threat.id, rel_path))
         if link is None or link.object_id is None:
             raise NotFound("Link not found")
-        file_obj = service._load_file(link.object_id)
-        if file_obj is None or file_obj.dhash != sha256.lower():
+        file_obj = File.access(sha256.lower())
+        if file_obj is None or file_obj.id != link.object_id:
             raise NotFound("Link not found")
         service.unlink_sample(threat, rel_path)
         return jsonify(_threat_response(threat))
@@ -297,6 +310,11 @@ class ThreatUploadResource(Resource):
             raise BadRequest(e.message)
 
         threat = service.get_threat(name) if isinstance(name, str) else None
+        if (threat is None or not threat.flat) and "README.md" in rel_paths:
+            raise BadRequest("README.md is the threat README, not a sample path")
+        # Resolve shares first: a bad upload_as must not leave a new threat.
+        share_with = get_shares_for_upload(form.get("upload_as", "*"))
+        created = False
         if threat is None:
             category = form.get("category")
             if not category:
@@ -310,8 +328,10 @@ class ThreatUploadResource(Resource):
                 )
             except ValidationError as e:
                 raise BadRequest(e.message)
+            except service.NameConflict:
+                raise Conflict("A threat with this name already exists")
+            created = True
 
-        share_with = get_shares_for_upload(form.get("upload_as", "*"))
         results = []
         for storage, rel_path in zip(files, rel_paths):
             try:
@@ -341,13 +361,19 @@ class ThreatUploadResource(Resource):
             file_obj.release_after_upload()
             try:
                 service.link_sample(threat, file_obj, rel_path)
-            except service.PathConflict:
+            except (service.PathConflict, ValidationError) as e:
+                db.session.rollback()
+                reason = (
+                    e.message
+                    if isinstance(e, ValidationError)
+                    else "rel_path already used by another sample in this threat"
+                )
                 results.append(
                     {
                         "rel_path": rel_path,
                         "sha256": file_obj.dhash,
                         "status": "rejected",
-                        "reason": "rel_path already used by another sample in this threat",
+                        "reason": reason,
                     }
                 )
                 continue
@@ -358,4 +384,16 @@ class ThreatUploadResource(Resource):
                     "status": "new" if is_new else "existing",
                 }
             )
+        if created and all(r["status"] == "rejected" for r in results):
+            # Nothing was linked: do not leave an empty threat behind.
+            service.delete_threat(threat)
+            response = jsonify(
+                {
+                    "message": "No file could be linked; the threat was not created",
+                    "threat": None,
+                    "results": results,
+                }
+            )
+            response.status_code = 400
+            return response
         return jsonify({"threat": _threat_response(threat), "results": results})

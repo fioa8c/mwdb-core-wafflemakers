@@ -17,7 +17,7 @@ def app(monkeypatch):
 
     # File.access(sha256) -> FakeFile or None; File.get_or_create -> store
     fake_file_cls = MagicMock()
-    fake_file_cls.access.side_effect = lambda ident: store.by_sha.get(ident)
+    fake_file_cls.access.side_effect = store.access
 
     def _get_or_create(file_name, file_stream, share_3rd_party, share_with=None, **kw):
         return store.get_or_create(file_name, file_stream)
@@ -33,6 +33,8 @@ def app(monkeypatch):
 
     monkeypatch.setattr(resource_mod, "File", fake_file_cls)
     monkeypatch.setattr(resource_mod, "hooks", fake_hooks)
+    monkeypatch.setattr(resource_mod, "_load_files", store.load_visible)
+    flask_app_resource = resource_mod
 
     flask_app = Flask(__name__)
     flask_app.add_url_rule(
@@ -59,6 +61,7 @@ def app(monkeypatch):
 
     flask_app.store = store
     flask_app.fake_hooks = fake_hooks
+    flask_app.resource_mod = flask_app_resource
     return flask_app
 
 
@@ -184,3 +187,97 @@ def test_upload_validation(client):
     # bad rel_path
     data = _multipart("NEW-2", [("../a.php", b"x")], category="threats")
     assert client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data").status_code == 400
+
+
+def test_unlink_of_inaccessible_sample_is_404(client, app):
+    from threatlib import service
+
+    t = service.create_threat("FIO-1", "threats")
+    f = app.store.add(b"<?php")
+    service.link_sample(t, f, "a.php")
+    f.accessible = False
+    r = client.delete(f"/api/threatlib/threat/FIO-1/sample/{f.sha256}?rel_path=a.php")
+    assert r.status_code == 404
+    assert service.sample_count(service.get_threat("FIO-1")) == 1
+
+
+def test_link_readme_path_and_flat_rules_are_400(client, app):
+    from threatlib import service
+
+    service.create_threat("FIO-1", "threats")
+    f = app.store.add(b"<?php")
+    r = client.post("/api/threatlib/threat/FIO-1/sample", json={"sha256": f.sha256, "rel_path": "README.md"})
+    assert r.status_code == 400
+    r = client.post("/api/threatlib/threat/FIO-1/sample", json={"sha256": f.sha256, "rel_path": ".git/config"})
+    assert r.status_code == 400
+    service.create_threat("c99", "webshells", flat=True)
+    r = client.post("/api/threatlib/threat/c99/sample", json={"sha256": f.sha256, "rel_path": "sub/c99.php"})
+    assert r.status_code == 400
+    assert service.sample_count(service.get_threat("FIO-1")) == 0
+
+
+def test_upload_readme_path_to_new_threat_is_400_and_creates_nothing(client, app):
+    from threatlib import service
+
+    data = _multipart("NEW-3", [("README.md", b"# hi")], category="threats")
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 400
+    assert service.get_threat("NEW-3") is None and app.store.by_sha == {}
+
+
+def test_upload_to_flat_threat_rejects_bad_layout_per_file(client, app):
+    from threatlib import service
+
+    service.create_threat("c99", "webshells", flat=True)
+    data = _multipart("c99", [("c99.php", b"<?php c99();"), ("other.php", b"<?php o();")])
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 200
+    results = r.get_json()["results"]
+    assert results[0]["status"] == "new"
+    assert results[1]["status"] == "rejected" and "flat" in results[1]["reason"]
+    assert r.get_json()["threat"]["sample_count"] == 1
+
+
+def test_upload_resolves_shares_before_creating_the_threat(client, app, monkeypatch):
+    from werkzeug.exceptions import BadRequest
+
+    from threatlib import service
+
+    def bad_shares(upload_as):
+        raise BadRequest("unknown group")
+
+    monkeypatch.setattr(app.resource_mod, "get_shares_for_upload", bad_shares)
+    data = _multipart("NEW-4", [("a.php", b"x")], category="threats")
+    data["upload_as"] = "nope"
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 400
+    assert service.get_threat("NEW-4") is None
+
+
+def test_upload_all_rejected_does_not_leave_an_empty_new_threat(client, app):
+    from threatlib import service
+
+    data = _multipart("NEW-5", [("empty.php", b"")], category="threats")
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 400
+    body = r.get_json()
+    assert body["results"][0]["status"] == "rejected"
+    assert service.get_threat("NEW-5") is None
+
+    # an existing threat is never deleted, even when every file is rejected
+    service.create_threat("OLD-1", "threats")
+    data = _multipart("OLD-1", [("empty.php", b"")])
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 200 and service.get_threat("OLD-1") is not None
+
+
+def test_upload_create_race_is_409(client, app, monkeypatch):
+    from threatlib import service
+
+    def conflict(*a, **k):
+        raise service.NameConflict("NEW-6")
+
+    monkeypatch.setattr(service, "create_threat", conflict)
+    data = _multipart("NEW-6", [("a.php", b"x")], category="threats")
+    r = client.post("/api/threatlib/upload", data=data, content_type="multipart/form-data")
+    assert r.status_code == 409

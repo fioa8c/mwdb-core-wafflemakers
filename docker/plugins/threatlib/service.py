@@ -6,13 +6,20 @@ by default; the sync passes commit=False and commits per file itself.
 
 from __future__ import annotations
 
+import posixpath
+
 from sqlalchemy import func
 
 from mwdb.model import db
 
 from .mirror import apply_mirror, remove_mirror
 from .model import Threat, ThreatSample, utcnow
-from .validation import validate_category, validate_name, validate_rel_path
+from .validation import (
+    ValidationError,
+    validate_category,
+    validate_name,
+    validate_rel_path,
+)
 
 
 class NameConflict(Exception):
@@ -103,14 +110,29 @@ def links_for_object(object_id: int) -> list[tuple[str, str]]:
     return [(c, n) for c, n in rows]
 
 
+def _check_layout(threat: Threat, rel_path: str) -> None:
+    """Flat threats are one file `<category>/<name><ext>`; a directory
+    threat's `README.md` is its README, never a sample."""
+    if threat.flat:
+        if "/" in rel_path or posixpath.splitext(rel_path)[0] != threat.name:
+            raise ValidationError(
+                f"a flat threat's only sample must be named {threat.name}<ext>"
+            )
+    elif rel_path == "README.md":
+        raise ValidationError("README.md is the threat README, not a sample path")
+
+
 def link_sample(threat: Threat, file_obj, rel_path, *, commit=True):
     rel_path = validate_rel_path(rel_path)
+    _check_layout(threat, rel_path)
     object_id = None if file_obj is None else file_obj.id
     existing = db.session.get(ThreatSample, (threat.id, rel_path))
     if existing is not None:
         if existing.object_id == object_id:
             return existing, False
         raise PathConflict(rel_path)
+    if threat.flat and sample_count(threat) > 0:
+        raise ValidationError("a flat threat has exactly one sample")
     now = utcnow()
     link = ThreatSample(
         threat_id=threat.id, rel_path=rel_path, object_id=object_id, added_at=now
@@ -149,6 +171,8 @@ def set_category(threat: Threat, category: str, *, commit=True) -> None:
     old = threat.category
     if category == old:
         return
+    if threat.flat:
+        raise ValidationError("flat threats cannot change category")
     object_ids = sorted(
         {link.object_id for link in threat.samples if link.object_id is not None}
     )
