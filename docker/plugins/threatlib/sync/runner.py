@@ -32,6 +32,11 @@ class SyncConfig:
     author: str
     branch: str = "trunk"
     share_with: str | None = "public"
+    # MWDB login the sync acts as (uploads, shares, tags). None means the
+    # configured admin login (MWDB_ADMIN_LOGIN).
+    user: str | None = None
+    # ssh known_hosts file pinning the git host key; None trusts on first use.
+    known_hosts: str | None = None
 
     @classmethod
     def from_env(cls) -> "SyncConfig":
@@ -51,6 +56,8 @@ class SyncConfig:
             ),
             branch=os.environ.get("MWDB_THREATLIB_BRANCH", "trunk"),
             share_with=os.environ.get("MWDB_THREATLIB_SHARE_WITH", "public") or None,
+            user=os.environ.get("MWDB_THREATLIB_USER") or None,
+            known_hosts=os.environ.get("MWDB_THREATLIB_KNOWN_HOSTS") or None,
         )
 
 
@@ -112,12 +119,15 @@ def _current_names(file_obj) -> set[str]:
 
 
 def _commit_message(ingest_stats: IngestStats, export_stats: ExportStats) -> str:
-    return (
+    message = (
         f"threatlib sync: +{ingest_stats.new_files} files, "
         f"-{ingest_stats.unlinked} unlinked, "
         f"{ingest_stats.readmes_updated} READMEs ingested; "
         f"exported {export_stats.threats} threats / {export_stats.files_written} files"
     )
+    if ingest_stats.preserved:
+        message += f"; {len(ingest_stats.preserved)} paths preserved"
+    return message
 
 
 def run_once(
@@ -129,6 +139,7 @@ def run_once(
         branch=config.branch,
         deploy_key=config.deploy_key,
         author=config.author,
+        known_hosts=config.known_hosts,
     )
     repo.ensure_clone()
     head_before = repo.reset_to_remote()
@@ -136,7 +147,15 @@ def run_once(
 
     ingest_stats = ingest(repo.path, manifest, store)
     repair_mirror(store)
-    new_manifest, export_stats = export(repo.path, store)
+    if ingest_stats.preserved:
+        logger.warning(
+            "threatlib sync: %d paths not ingested, preserved as-is for retry: %s",
+            len(ingest_stats.preserved),
+            ", ".join(sorted(ingest_stats.preserved)),
+        )
+    new_manifest, export_stats = export(
+        repo.path, store, preserve=ingest_stats.preserved
+    )
 
     # export() always stamps a fresh generated_at, which would make every run
     # dirty even when nothing actually changed. When the file/readme content
@@ -168,6 +187,17 @@ def run_once(
     return RunResult(head_before, ingest_stats, export_stats, commit, pushed)
 
 
+def _resolve_user(login: str | None):
+    """The MWDB user the sync acts as: `login`, or the configured admin.
+    Upstream `Object._get_or_create` reads `g.auth_user.login` for every
+    share group, so the sync cannot run anonymously."""
+    from mwdb.core.config import app_config
+    from mwdb.model import User, db
+
+    login = login or app_config.mwdb.admin_login
+    return db.session.query(User).filter(User.login == login).first()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="threatlib-sync")
     parser.add_argument(
@@ -188,7 +218,15 @@ def main(argv=None) -> int:
     store = MwdbStore(config.share_with)
     while True:
         with app.app_context():
-            g.auth_user = None
+            user = _resolve_user(config.user)
+            if user is None:
+                logger.error(
+                    "threatlib sync: MWDB user %r not found; set "
+                    "MWDB_THREATLIB_USER to an existing login",
+                    config.user or "<MWDB_ADMIN_LOGIN>",
+                )
+                return 2
+            g.auth_user = user
             try:
                 from ..attributes import ensure_attribute_definition
 

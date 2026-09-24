@@ -10,14 +10,21 @@ Rules (spec §4 step 3, plus round-trip fidelity rules from repo inspection):
 - A path present in the manifest but missing on disk was deleted in the
   repo: unlink it.
 - Empty files are linked with object_id NULL.
+- Symlinks (files or directories, at any depth under a category dir) are
+  never followed or ingested: each one is counted as skipped and preserved
+  so the export writes it back unchanged.
+- Every path that hit an error or was skipped is reported in
+  `IngestStats.preserved`; the export writes those paths back as they were
+  and leaves them out of the manifest, so the next run retries them.
 """
 
 from __future__ import annotations
 
 import io
 import logging
+import os
 import posixpath
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mwdb.model import db
@@ -39,6 +46,9 @@ class IngestStats:
     unlinked: int = 0
     skipped: int = 0
     errors: int = 0
+    # Repo-relative POSIX paths the export must write back as they are
+    # (errors, skips, symlinks). Informational: excluded from ==/repr.
+    preserved: set[str] = field(default_factory=set, compare=False, repr=False)
 
 
 def classify(repo_path: Path, path: Path):
@@ -59,22 +69,50 @@ def classify(repo_path: Path, path: Path):
     return category, name, rel_path, False, is_readme
 
 
-def _iter_files(repo_path: Path):
+def _iter_entries(repo_path: Path):
+    """Yield (path, is_symlink) for every regular file and every symlink
+    under the category dirs, sorted like the paths they are. Never follows a
+    symlink: a symlinked directory is yielded as one entry and not walked."""
+    entries: list[tuple[Path, bool]] = []
     for category in CATEGORIES:
         cat_dir = repo_path / category
+        if cat_dir.is_symlink():
+            entries.append((cat_dir, True))
+            continue
         if not cat_dir.is_dir():
             continue
-        for path in sorted(p for p in cat_dir.rglob("*") if p.is_file()):
-            yield path
+        for dirpath, dirnames, filenames in os.walk(cat_dir, followlinks=False):
+            for d in list(dirnames):
+                if os.path.islink(os.path.join(dirpath, d)):
+                    dirnames.remove(d)
+                    entries.append((Path(dirpath, d), True))
+            for f in filenames:
+                path = Path(dirpath, f)
+                if os.path.islink(path):
+                    entries.append((path, True))
+                elif path.is_file():
+                    entries.append((path, False))
+    entries.sort(key=lambda e: e[0])
+    return entries
 
 
 def _get_or_create_threat(category, name, flat):
     """Returns (threat, created). Does not commit or touch stats: the caller
-    only counts it once the whole per-file transaction has committed."""
+    only counts it once the whole per-file transaction has committed.
+
+    Refuses (ValidationError -> skipped and preserved) to merge a path into
+    an existing threat of another category or layout: threat names are
+    global, so `for-later-review/X/` next to `threats/X/`, or
+    `webshells/foo.php` next to `webshells/foo/`, must be resolved by hand."""
     threat = service.get_threat(name)
     if threat is None:
         threat = service.create_threat(name, category, flat=flat, commit=False)
         return threat, True
+    if threat.category != category or bool(threat.flat) != flat:
+        layout = "flat" if threat.flat else "directory"
+        raise ValidationError(
+            f"threat {name!r} already exists as a {layout} threat in {threat.category}/"
+        )
     return threat, False
 
 
@@ -152,12 +190,17 @@ def ingest(
     try:
         seen_files: set[str] = set()
         seen_readmes: set[str] = set()
-        for path in _iter_files(repo_path):
+        for path, is_symlink in _iter_entries(repo_path):
+            key = path.relative_to(repo_path).as_posix()
+            if is_symlink:
+                logger.warning("threatlib ingest: skipping symlink %s", key)
+                stats.skipped += 1
+                stats.preserved.add(key)
+                continue
             info = classify(repo_path, path)
             if info is None:
                 continue
             category, name, rel_path, flat, is_readme = info
-            key = path.relative_to(repo_path).as_posix()
             try:
                 if is_readme:
                     threat_dir = f"{category}/{name}"
@@ -189,10 +232,12 @@ def ingest(
                 db.session.rollback()
                 logger.warning("threatlib ingest: skipping %s: %s", key, e.message)
                 stats.skipped += 1
+                stats.preserved.add(key)
             except Exception as e:
                 db.session.rollback()
                 logger.error("threatlib ingest: error on %s: %s", key, e)
                 stats.errors += 1
+                stats.preserved.add(key)
 
         if manifest is not None:
             for key in sorted(set(manifest.files) - seen_files):

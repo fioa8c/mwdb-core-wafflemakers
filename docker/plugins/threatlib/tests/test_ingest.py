@@ -163,3 +163,74 @@ def test_link_failure_rolls_back_the_threat_it_created(repo, store, monkeypatch)
     assert service.get_threat("wf-1") is None
     assert stats.new_threats == 6
     assert service.get_threat("FIO-1") is not None
+
+
+def test_errors_and_skips_are_preserved(repo, store, monkeypatch):
+    w(repo, "threats/My Sample (2)/x.php", b"<?php bad-name();")
+    w(repo, "threats/My Sample (2)/README.md", b"# bad name\n")
+    real = store.get_or_create
+
+    def flaky(file_name, stream):
+        if file_name == "a.php":
+            raise RuntimeError("storage down")
+        return real(file_name, stream)
+
+    monkeypatch.setattr(store, "get_or_create", flaky)
+    stats = ingest(repo, None, store)
+    assert stats.errors == 1 and stats.skipped == 2
+    assert stats.preserved == {
+        "threats/FIO-1/a.php",
+        "threats/My Sample (2)/x.php",
+        "threats/My Sample (2)/README.md",
+    }
+    # preserved is informational: it does not take part in equality
+    assert IngestStats(errors=1) == IngestStats(errors=1, preserved={"x"})
+
+
+def test_symlinks_are_skipped_and_preserved(repo, store, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    secret = outside / "secret"
+    secret.write_bytes(b"deploy key material")
+    (repo / "threats/FIO-1/link.php").symlink_to(secret)
+    (repo / "threats/linkdir").symlink_to(outside, target_is_directory=True)
+    (repo / "threats/root-link").symlink_to(secret)
+
+    stats = ingest(repo, None, store)
+    assert stats.skipped == 3
+    assert stats.preserved == {
+        "threats/FIO-1/link.php",
+        "threats/linkdir",
+        "threats/root-link",
+    }
+    assert sha256_bytes(b"deploy key material") not in store.by_sha
+    assert service.get_threat("linkdir") is None
+    assert "link.php" not in [l.rel_path for l in service.get_threat("FIO-1").samples]
+
+
+def test_symlinked_category_dir_is_not_walked(tmp_path, store, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    w(outside, "X/secret.php", b"secret")
+    (tmp_path / "threats").symlink_to(outside, target_is_directory=True)
+    stats = ingest(tmp_path, None, store)
+    assert stats.skipped == 1 and stats.preserved == {"threats"}
+    assert service.get_threat("X") is None and store.by_sha == {}
+
+
+def test_same_name_in_other_category_is_skipped(repo, store):
+    ingest(repo, None, store)
+    w(repo, "for-later-review/FIO-1/b.php", b"<?php other-category();")
+    stats = ingest(repo, None, store)
+    assert stats.skipped == 1 and stats.preserved == {"for-later-review/FIO-1/b.php"}
+    fio1 = service.get_threat("FIO-1")
+    assert fio1.category == "threats"
+    assert "b.php" not in [l.rel_path for l in fio1.samples]
+
+
+def test_flat_and_dir_threat_with_same_name_is_skipped(tmp_path, store):
+    w(tmp_path, "webshells/foo/x.php", b"<?php dir();")
+    w(tmp_path, "webshells/foo.php", b"<?php flat();")
+    stats = ingest(tmp_path, None, store)
+    assert stats.new_threats == 1 and stats.skipped == 1
+    assert stats.preserved == {"webshells/foo.php"}
+    foo = service.get_threat("foo")
+    assert foo.flat is False and [l.rel_path for l in foo.samples] == ["x.php"]

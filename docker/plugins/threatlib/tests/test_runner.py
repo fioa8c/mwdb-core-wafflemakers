@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,127 @@ def test_repair_mirror_reapplies_and_strips(tmp_path, store):
     assert f.tags == {"threats"} and f.attributes[ATTRIBUTE_KEY] == {"FIO-1"}
 
 
+def _push(work, rel, data):
+    _git(work, "pull", "-q")
+    w(work, rel, data)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", f"add {rel}")
+    _git(work, "push", "-q", "origin", "trunk")
+
+
+def _manifest_files(work):
+    import json
+
+    _git(work, "pull", "-q")
+    return set(json.loads((work / MANIFEST_NAME).read_text())["files"])
+
+
+def test_failed_ingest_is_preserved_in_trunk_and_retried(tmp_path, remote, store, monkeypatch, caplog):
+    bare, work = remote
+    cfg = _config(tmp_path, bare)
+    run_once(cfg, store)
+    _push(work, "threats/B/b.php", b"<?php b();")
+
+    real = store.get_or_create
+
+    def flaky(file_name, stream):
+        if file_name == "b.php":
+            raise RuntimeError("storage down")
+        return real(file_name, stream)
+
+    monkeypatch.setattr(store, "get_or_create", flaky)
+    result = run_once(cfg, store)
+    assert result.ingest.errors == 1 and result.ingest.preserved == {"threats/B/b.php"}
+    assert "threats/B/b.php" in caplog.text and "preserved" in caplog.text
+    _git(work, "pull", "-q")
+    assert (work / "threats/B/b.php").read_bytes() == b"<?php b();"
+    assert "threats/B/b.php" not in _manifest_files(work)
+    assert service.get_threat("B") is None
+
+    monkeypatch.setattr(store, "get_or_create", real)
+    result = run_once(cfg, store)
+    assert result.ingest.new_files == 1 and result.ingest.preserved == set()
+    assert [l.rel_path for l in service.get_threat("B").samples] == ["b.php"]
+    assert "threats/B/b.php" in _manifest_files(work)
+    assert (work / "threats/B/b.php").read_bytes() == b"<?php b();"
+
+
+def test_invalid_threat_dir_is_preserved_across_runs(tmp_path, remote, store):
+    bare, work = remote
+    cfg = _config(tmp_path, bare)
+    _push(work, "threats/My Sample (2)/x.php", b"<?php x();")
+    for _ in range(3):
+        result = run_once(cfg, store)
+        assert result.ingest.skipped == 1
+        assert result.ingest.preserved == {"threats/My Sample (2)/x.php"}
+        _git(work, "pull", "-q")
+        assert (work / "threats/My Sample (2)/x.php").read_bytes() == b"<?php x();"
+        assert not any("My Sample" in k for k in _manifest_files(work))
+    first_commit = _git(work, "log", "--format=%s", "-1")
+    assert "1 paths preserved" in first_commit
+
+
+def test_push_rejection_leaves_clone_to_be_reset(tmp_path, remote, store, monkeypatch):
+    from threatlib.sync.repo import GitError
+
+    bare, work = remote
+    cfg = _config(tmp_path, bare)
+    real_reset = GitRepo.reset_to_remote
+
+    def reset_then_teammate_pushes(self):
+        head = real_reset(self)
+        _push(work, "threats/FIO-1/race.php", b"<?php race();")
+        return head
+
+    monkeypatch.setattr(GitRepo, "reset_to_remote", reset_then_teammate_pushes)
+    with pytest.raises(GitError):
+        run_once(cfg, store)
+    local_commit = _git(tmp_path / "clone", "rev-parse", "HEAD")
+    assert local_commit != _git(work, "rev-parse", "HEAD")
+
+    monkeypatch.setattr(GitRepo, "reset_to_remote", real_reset)
+    result = run_once(cfg, store)
+    assert result.pushed is True
+    clone_log = _git(tmp_path / "clone", "log", "--format=%H")
+    assert local_commit not in clone_log.split()
+    _git(work, "pull", "-q")
+    assert (work / "threats/FIO-1/race.php").exists() and (work / MANIFEST_NAME).exists()
+
+
+def test_main_sets_sync_user_and_fails_fast_without_one(monkeypatch):
+    from flask import Flask, g
+
+    import threatlib.attributes as attributes
+    import threatlib.sync.runner as runner
+
+    monkeypatch.setenv("MWDB_THREATLIB_REPO_URL", "/nowhere.git")
+    monkeypatch.setattr(sys.modules["mwdb.cli.base"], "create_app", lambda: Flask("t"))
+    monkeypatch.setattr(attributes, "ensure_attribute_definition", lambda: None)
+    seen = {}
+
+    def fake_run_once(config, store):
+        seen["user"] = g.auth_user
+
+    monkeypatch.setattr(runner, "run_once", fake_run_once)
+
+    lookups = []
+    bot = object()
+
+    def resolve(login):
+        lookups.append(login)
+        return bot
+
+    monkeypatch.setattr(runner, "_resolve_user", resolve)
+    assert runner.main(["--once"]) == 0
+    assert seen["user"] is bot and lookups == [None]
+
+    monkeypatch.setenv("MWDB_THREATLIB_USER", "threatlib-bot")
+    seen.clear()
+    monkeypatch.setattr(runner, "_resolve_user", lambda login: None)
+    assert runner.main(["--once"]) == 2
+    assert seen == {}
+
+
 def test_config_from_env(monkeypatch):
     monkeypatch.setenv("MWDB_THREATLIB_REPO_URL", "git@x:y.git")
     monkeypatch.setenv("MWDB_THREATLIB_DEPLOY_KEY", "/k")
@@ -153,6 +275,11 @@ def test_config_from_env(monkeypatch):
     assert cfg.repo_url == "git@x:y.git" and cfg.deploy_key == "/k"
     assert cfg.interval == 60 and cfg.push is False and str(cfg.clone_dir) == "/data/r"
     assert cfg.branch == "trunk" and cfg.share_with == "public"
+    assert cfg.user is None and cfg.known_hosts is None
+    monkeypatch.setenv("MWDB_THREATLIB_USER", "threatlib-bot")
+    monkeypatch.setenv("MWDB_THREATLIB_KNOWN_HOSTS", "/run/secrets/kh")
+    cfg = SyncConfig.from_env()
+    assert cfg.user == "threatlib-bot" and cfg.known_hosts == "/run/secrets/kh"
     monkeypatch.delenv("MWDB_THREATLIB_REPO_URL")
     with pytest.raises(SystemExit):
         SyncConfig.from_env()

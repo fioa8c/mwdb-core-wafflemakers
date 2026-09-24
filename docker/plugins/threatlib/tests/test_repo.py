@@ -107,3 +107,52 @@ def test_deploy_key_sets_ssh_command(tmp_path):
     env = repo._env()
     assert "-i /keys/id" in env["GIT_SSH_COMMAND"]
     assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]
+    assert "UserKnownHostsFile" not in env["GIT_SSH_COMMAND"]
+
+
+def test_known_hosts_pins_host_key_and_paths_are_quoted(tmp_path):
+    repo = GitRepo(
+        tmp_path / "c",
+        "git@example.com:x/y.git",
+        deploy_key="/keys/my key",
+        known_hosts="/run/secrets/known hosts",
+    )
+    ssh = repo._env()["GIT_SSH_COMMAND"]
+    assert "-i '/keys/my key'" in ssh
+    assert "-o UserKnownHostsFile='/run/secrets/known hosts'" in ssh
+    assert "StrictHostKeyChecking=yes" in ssh and "accept-new" not in ssh
+
+
+def test_reset_removes_ignored_files(tmp_path, remote):
+    bare, work = remote
+    (work / ".gitignore").write_text("*.cache\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "ignore")
+    _git(work, "push", "-q", "origin", "trunk")
+    repo = GitRepo(tmp_path / "clone", str(bare))
+    repo.ensure_clone()
+    (tmp_path / "clone" / "threats" / "x.cache").write_text("junk")
+    repo.reset_to_remote()
+    assert not (tmp_path / "clone" / "threats" / "x.cache").exists()
+
+
+def test_stale_index_lock_is_removed(tmp_path, remote, caplog):
+    import os
+    import time
+
+    bare, work = remote
+    repo = GitRepo(tmp_path / "clone", str(bare))
+    repo.ensure_clone()
+    lock = tmp_path / "clone" / ".git" / "index.lock"
+    lock.write_text("")
+    old = time.time() - 11 * 60
+    os.utime(lock, (old, old))
+    repo.reset_to_remote()
+    assert not lock.exists()
+    assert "index.lock" in caplog.text
+
+    # a fresh lock belongs to a live git process: leave it (git then fails)
+    lock.write_text("")
+    with pytest.raises(GitError):
+        repo.reset_to_remote()
+    assert lock.exists()
