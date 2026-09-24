@@ -1,10 +1,12 @@
 import json
+import re
 from tempfile import SpooledTemporaryFile
 
 import requests
 from flask import Response, g, request
 from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 
+from mwdb.core.auth import DownloadType
 from mwdb.core.capabilities import Capabilities
 from mwdb.core.config import app_config
 from mwdb.core.hooks import hooks
@@ -17,7 +19,14 @@ from mwdb.schema.file import FileItemResponseSchema
 from mwdb.schema.remotes import RemoteOptionsRequestSchema, RemotesListResponseSchema
 from mwdb.version import app_build_version
 
-from . import get_shares_for_upload, loads_schema, logger, requires_authorization
+from . import (
+    ensure_file_download_access,
+    get_shares_for_upload,
+    loads_schema,
+    logger,
+    requires_authorization,
+    requires_capabilities,
+)
 
 
 class RemoteListResource(Resource):
@@ -86,7 +95,19 @@ class RemoteAPI:
 
 
 class RemoteAPIResource(Resource):
+    @staticmethod
+    def check_download_access(remote_path):
+        if re.fullmatch(r"file/[^/]+/download/zip", remote_path):
+            ensure_file_download_access(DownloadType.zip)
+        elif (
+            re.fullmatch(r"file/[^/]+/download", remote_path)
+            or re.fullmatch(r"request/sample/[^/]+", remote_path)
+            or re.fullmatch(r"download/[^/]+", remote_path)
+        ):
+            ensure_file_download_access(DownloadType.raw)
+
     def do_request(self, method, remote_name, remote_path):
+        self.check_download_access(remote_path)
         remote = RemoteAPI(remote_name)
         response = remote.request(
             method, remote_path, params=request.args, data=request.data, stream=True
@@ -96,15 +117,19 @@ class RemoteAPIResource(Resource):
             mimetype=response.headers["content-type"],
         )
 
+    @requires_authorization
     def get(self, remote_name, remote_path):
         return self.do_request("get", remote_name, remote_path)
 
+    @requires_authorization
     def post(self, remote_name, remote_path):
         return self.do_request("post", remote_name, remote_path)
 
+    @requires_authorization
     def put(self, remote_name, remote_path):
         return self.do_request("put", remote_name, remote_path)
 
+    @requires_authorization
     def delete(self, remote_name, remote_path):
         return self.do_request("delete", remote_name, remote_path)
 
@@ -145,6 +170,7 @@ class RemoteFilePullResource(RemotePullResource):
     on_reuploaded = hooks.on_reuploaded_file
 
     @requires_authorization
+    @requires_capabilities(Capabilities.adding_files)
     def post(self, remote_name, identifier):
         """
         ---
@@ -223,6 +249,7 @@ class RemoteConfigPullResource(RemotePullResource):
     on_reuploaded = hooks.on_reuploaded_config
 
     @requires_authorization
+    @requires_capabilities(Capabilities.adding_configs)
     def post(self, remote_name, identifier):
         """
         ---
@@ -329,6 +356,7 @@ class RemoteTextBlobPullResource(RemotePullResource):
     on_reuploaded = hooks.on_reuploaded_text_blob
 
     @requires_authorization
+    @requires_capabilities(Capabilities.adding_blobs)
     def post(self, remote_name, identifier):
         """
         ---

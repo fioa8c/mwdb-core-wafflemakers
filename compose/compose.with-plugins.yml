@@ -1,0 +1,11 @@
+# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf) and their sidecars
+services:
+  mwdb:
+    environment:
+      MWDB_PLUGINS: "yarax_regex,phpdeobf"
+      MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
+  phpdeobf:
+    build:
+      context: ./docker/phpdeobf
+      dockerfile: Dockerfile.server
+    restart: unless-stopped

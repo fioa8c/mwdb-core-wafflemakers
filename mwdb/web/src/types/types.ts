@@ -16,6 +16,8 @@ export enum Capability {
     addingAllAttributes = "adding_all_attributes",
     removingAttributes = "removing_attributes",
     addingFiles = "adding_files",
+    downloadingFiles = "downloading_files",
+    downloadingZippedFiles = "downloading_zipped_files",
     addingConfigs = "adding_configs",
     addingBlobs = "adding_blobs",
     unlimitedRequests = "unlimited_requests",
@@ -58,6 +60,7 @@ export type Group = {
     private: boolean;
     users: string[];
     workspace: boolean;
+    provider: string;
 };
 
 export type ObjectType = "file" | "blob" | "config" | "object";
@@ -263,6 +266,12 @@ export type Permission = {
     set: boolean;
 };
 
+export enum OpenIDGroupManagementMode {
+    NONE = "NONE",
+    FULL = "FULL",
+    MIXED = "MIXED",
+}
+
 export type Provider = {
     name: string;
     client_id: string;
@@ -273,6 +282,9 @@ export type Provider = {
     jwks_endpoint: string;
     logout_endpoint: string;
     requires_approval: boolean;
+    oidc_groups_management_mode: OpenIDGroupManagementMode;
+    oidc_groups_match_pattern: string;
+    oidc_groups_replace_pattern: string;
 };
 
 export type ActivePlugin = {

@@ -7,6 +7,58 @@ have compatibility problems after minor mwdb-core upgrade.
 
 For upgrade instructions, see :ref:`Upgrading mwdb-core to latest version`.
 
+v2.19.0
+-------
+
+This release contains **security fixes** and small improvements regarding file contents preview.
+
+Complete changelog can be found here: `v2.19.0 changelog <https://github.com/CERT-Polska/mwdb-core/releases/tag/v2.19.0>`_.
+
+[Security fix] Missing authentication requirement in Remote Instances proxy API
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In previous versions, including v2.18.0, Remote Instances proxy API does not verify authentication, allowing unauthenticated users to send arbitrary requests to the remote MWDB instance using the permissions and identity associated with the configured API key.
+
+The impact of this vulnerability is limited to users who have configured Remote Instances on their local MWDB Core instance. Unauthenticated attackers can execute requests against the remote instance using the configured API key, potentially performing unauthorized actions.
+
+This version marks Remote Instances as a candidate for deprecation and removal. The feature was meant to provide a foundation for working in federated model (like in MISP), but this idea was abandoned.
+
+See also:
+
+- https://github.com/CERT-Polska/mwdb-core/security/advisories/GHSA-942c-r7qj-w895
+
+[Security fix] Undocumented HTTP method on deprecated config/blob upload endpoints allow bypassing permissions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The deprecated upload endpoints ``/api/config/{identifier}`` and ``/api/blob/{identifier}`` can be called using the POST method, whereas only the PUT method is documented and protected by proper capability checks.
+
+As a result, any authenticated user without the adding_configs capability is able to upload a config object via the POST /api/config/{identifier} endpoint, and any authenticated user without the adding_blobs capability is able to upload a text blob object via the POST /api/blob/{identifier} endpoint.
+
+In v2.19.0, the POST method is no longer available and returns HTTP 405 Method Not Allowed. The legacy PUT method is considered deprecated and is going to be removed in the next major version.
+
+See also:
+
+- https://github.com/CERT-Polska/mwdb-core/security/advisories/GHSA-8fv8-wffg-4323
+
+v2.18.0
+-------
+
+This release contains major improvements of OpenID Connect integration along with various bugfixes and improvements. MWDB Core code is now linted and formatted using `Ruff <https://docs.astral.sh/ruff/>`_.
+
+Complete changelog can be found here: `v2.18.0 changelog <https://github.com/CERT-Polska/mwdb-core/releases/tag/v2.18.0>`_.
+
+[New feature] Managing MWDB groups using OpenID Provider
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This release contains new feature that allows to synchronize OpenID Provider groups membership with MWDB groups. The synchronization occurs when user authenticates using OpenID Connect.
+
+There are two synchronization modes:
+
+- **FULL**: User custom groups are fully synchronized with the OIDC groups. Users are automatically added to all matching MWDB groups and removed from groups that are no longer present in the OIDC.
+- **MIXED**: Users are added to or removed only from MWDB groups explicitly associated with the OIDC provider.
+
+Read more about this feature in the :ref:`Manage MWDB groups from OpenID Provider groups` documentation.
+
 v2.17.0
 -------
 

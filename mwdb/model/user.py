@@ -1,5 +1,5 @@
-from datetime import datetime, timezone
 import os
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 import bcrypt
@@ -54,7 +54,7 @@ class User(db.Model):
         OpenIDUserIdentity,
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
     permissions = db.relationship(
         "ObjectPermission",

@@ -17,7 +17,7 @@ To enable OIDC authentication, configure MWDB using one of the following methods
     ...
     enable_oidc=1
 
-If you want to test this functionality, the easiest way is to set up the environment with a ``docker-compose-oidc-dev.yml`` file.
+If you want to test this functionality, the easiest way is to set up the environment with a ``compose/compose.with-oidc.yml`` file.
 It deploys an external identity provider based on `Keycloak <https://www.keycloak.org/>`_
 
 Development environment can be configured automatically using script described in ``dev/oidc/README.md``.
@@ -25,7 +25,13 @@ Development environment can be configured automatically using script described i
 Step-by-step configuration
 --------------------------
 
-In this section we will configure authentication via Keycloak using ``docker-compose-oidc-dev.yml`` environment as an example. In principle, it should work with any other OIDC-capable system.
+In this section we will configure authentication via Keycloak using development environment as an example. In principle, it should work with any other OIDC-capable system.
+
+Start the environment using the following command:
+
+.. code-block:: console
+
+    $ ./compose.sh --with dev --with oidc up -d
 
 .. note::
     Using the OpenID Connect protocol requires correct ``base_url`` to be set in configuration.
@@ -150,7 +156,7 @@ can be turned on by setting:
 
    Enabled ``enable_registration`` implies enabled ``enable_oidc_registration`` for compatibility reasons, as separate option for OIDC was added in v2.17.0.
 
-    ``enable_oidc_registration`` is already enabled in ``docker-compose-oidc-dev.yml`` so you don't have to set anything in demonstration environment.
+    ``enable_oidc_registration`` is already enabled in ``compose.with-oidc.yml`` so you don't have to set anything in demonstration environment.
 
 Then we may try to create user ``foo`` in keycloak (just like ``mwdb-admin`` user before) and try to login.
 
@@ -213,6 +219,116 @@ If password-based login is disabled, MWDB will use ``register_no_pass.txt`` temp
 login turned on, but don't pass set password link to users - you can achieve this by changing ``register.txt`` mail template
 and removing credentials part. To set up your own templates, change ``mail_templates_dir`` in configuration to point at your folder,
 copy templates from https://github.com/CERT-Polska/mwdb-core/tree/master/mwdb/templates/mail and modify them accordingly.
+
+Manage MWDB groups from OpenID Provider groups
+----------------------------------------------
+
+.. versionadded:: 2.18.0
+
+If your identity provider is configured to include user group information in the OpenID token,
+MWDB can automatically synchronize these groups with local MWDB groups.
+
+This feature can be enabled or disabled separately for each provider in
+``Settings`` → ``OpenID Connect`` by selecting the appropriate provider.
+
+.. image:: ./_static/oidc-groups-settings.png
+   :target: ./_static/oidc-groups-settings.png
+   :alt: OIDC groups management settings
+
+The following synchronization modes are available:
+
+- **NONE** (default): Group synchronization is disabled. Groups included in the OIDC token are ignored.
+- **FULL**: User custom groups are fully synchronized with the groups included in the OIDC token.
+
+  Users are automatically added to all matching MWDB groups and removed from groups that are no longer present in the token.
+  This means that users may be automatically removed from locally assigned MWDB groups if those groups are not included in the OIDC token.
+
+  The following groups are never removed automatically:
+
+  - the user's private group,
+  - the provider group,
+  - groups marked as default (for example, the ``public`` group).
+
+- **MIXED**: Users are added to or removed only from MWDB groups associated with the current OIDC provider.
+  Local groups and groups managed by other providers remain unchanged, regardless of the groups included in the OIDC token.
+
+If a referenced group does not already exist in MWDB, it is created automatically and linked to the corresponding OIDC provider.
+
+User group membership is synchronized whenever the user authenticates to MWDB using the OpenID provider.
+
+Group filtering and name mapping
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Groups received from the OIDC provider can be filtered using the ``OIDC groups matching pattern=(.*)`` parameter.
+
+This parameter accepts a regular expression and can be used both to:
+
+- filter which OIDC groups should be synchronized,
+- transform OIDC group names into MWDB group names.
+
+Group name mapping is configured using the ``OIDC groups replacing pattern=\1`` parameter.
+
+The replacement pattern uses the result of the matching expression to generate the internal MWDB group name.
+Regular expression capture groups are supported.
+
+.. note::
+
+   To synchronize only groups whose names in OIDC start with ``MWDB_``, configure *OIDC groups matching pattern*
+   as: ``MWDB_(.*)``. You can then map these groups to MWDB groups prefixed with ``EXTERNAL_``
+   by setting *OIDC groups replacing pattern* to: ``EXTERNAL_\1``. With this configuration, the OIDC group
+   ``MWDB_MALWARE_ANALYSTS`` will be mapped to the local MWDB group ``EXTERNAL_MALWARE_ANALYSTS``.
+
+Managing existing groups in MIXED mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, MIXED mode performs member synchronization only for new groups that were created by OpenID Provider during
+synchronization.
+
+To manage already existing groups, you need to associate them with chosen provider in Settings.
+
+You can do that by navigating to ``Settings`` → ``Groups`` → <choosing group> and editing the ``OpenID Provider`` field.
+
+.. image:: ./_static/group-setting-oidc-provider.png
+   :target: ./_static/group-setting-oidc-provider.png
+   :alt: Setting OpenID Provider in group
+
+This setting can be also used for excluding the group from OpenID Provider management by editing this field to "none".
+
+Example: Setting up MWDB group management using Keycloak
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. Go to ``Client scopes`` and create new client scope
+
+.. image:: ./_static/keycloak-client-scope.png
+   :target: ./_static/keycloak-client-scope.png
+   :alt: Creating Client scope in Keycloak
+
+2. Then, navigate to ``Mappers`` tab and choose ``Configure a new mapper``. Choose ``Group Membership``.
+
+.. image:: ./_static/keycloak-client-scope-new-mapper.png
+   :target: ./_static/keycloak-client-scope-new-mapper.png
+   :alt: Configuring new mapper in Keycloak
+
+.. image:: ./_static/keycloak-client-scope-choose-mapper.png
+   :target: ./_static/keycloak-client-scope-choose-mapper.png
+   :alt: Choosing Group Membership
+
+3. Then set Token Claim Name parameter as "groups" and turn off "Full group path". Full groups paths are preceded with
+slash, so group names can't be directly mapped to MWDB group names. If you want to use nested groups, you may need a
+regex that would provide a correct mapping to valid group name.
+
+.. image:: ./_static/keycloak-client-scope-mapper-details.png
+   :target: ./_static/keycloak-client-scope-mapper-details.png
+   :alt: Client scope mapper settings
+
+4. Then go to ``Clients``, pick MWDB client and add created ``Client scope`` as a default scope for that client.
+
+.. image:: ./_static/keycloak-client-scope-add-to-client.png
+   :target: ./_static/keycloak-client-scope-add-to-client.png
+   :alt: Adding created client scope into client as a default
+
+After setting MIXED or FULL management mode in MWDB configuration - Keycloak groups will be automatically synchronized
+on user logon.
 
 Disable password-based authentication
 -------------------------------------

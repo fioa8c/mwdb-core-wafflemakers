@@ -32,6 +32,9 @@ export function GroupItem(props: Props) {
                 </span>
             </td>
             <td>
+                {props.provider ?? <span className="text-muted">none</span>}
+            </td>
+            <td>
                 {props.name === "public" ? (
                     "(Group is public and contains all members)"
                 ) : (

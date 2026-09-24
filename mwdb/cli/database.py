@@ -17,7 +17,10 @@ def _initialize(admin_password):
     """
     public_group = Group(
         name=Group.PUBLIC_GROUP_NAME,
-        capabilities=[],
+        capabilities=[
+            Capabilities.downloading_files,
+            Capabilities.downloading_zipped_files,
+        ],
         workspace=False,
         default=True,
         immutable=True,
@@ -37,7 +40,10 @@ def _initialize(admin_password):
     db.session.add(registered_group)
 
     admin_group = Group(
-        name=app_config.mwdb.admin_login, capabilities=Capabilities.all(), private=True
+        name=app_config.mwdb.admin_login,
+        capabilities=Capabilities.all(),
+        private=True,
+        immutable=True,
     )
     db.session.add(admin_group)
 
