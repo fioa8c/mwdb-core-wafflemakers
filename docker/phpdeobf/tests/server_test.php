@@ -211,12 +211,39 @@ try {
         if (strpos($body['peeled']['output'], 'echo 1') === false) {
             throw new \RuntimeException('FAIL: peel: layer content missing');
         }
-        assert_eq($body['analysis']['analyzed'], 'peeled', 'peel: analysis ran on peeled output');
+        assert_eq($body['analysis']['analyzed'], 'static+peeled', 'peel: analysis ran on static+peeled output');
         echo "ok: peel: {$body['peeled']['layers']} layer(s) captured\n";
     } else {
         assert_eq($body['peeled'], null, 'peel (no extension): peeled null');
         assert_eq($body['warnings'][0]['code'], 'eval_peel_unavailable', 'peel (no extension): warning');
         echo "SKIP: eval-hook extension not available here; peel assertions ran in fallback mode only\n";
+    }
+
+    // --- merged analysis: sink outside eval() must still be reported ---
+    $mixedSource = "<?php \$c = \$_GET['c']; eval(base64_decode('ZWNobyAxOw==')); system(\$c);";
+    [$code, $body] = post_json($port, '/deobfuscate', [
+        'source' => $mixedSource, 'options' => ['eval_peel' => true, 'analyze' => true],
+    ]);
+    assert_eq($code, 200, 'merged analysis: 200');
+    if (!in_array('os_exec', $body['analysis']['summary']['categories_present'], true)) {
+        throw new \RuntimeException('FAIL: merged analysis: os_exec category expected, got ' . json_encode($body['analysis']['summary']));
+    }
+    $staticSinkFound = false;
+    foreach ($body['analysis']['sinks'] as $sink) {
+        if (($sink['origin'] ?? null) === 'static') {
+            $staticSinkFound = true;
+            break;
+        }
+    }
+    if (!$staticSinkFound) {
+        throw new \RuntimeException('FAIL: merged analysis: expected a sink with origin=static, got ' . json_encode($body['analysis']['sinks']));
+    }
+    echo "ok: merged analysis: os_exec sink outside eval() reported with origin=static\n";
+    if ($evalhook) {
+        if (!is_array($body['peeled']) || ($body['peeled']['layers'] ?? 0) < 1) {
+            throw new \RuntimeException('FAIL: merged analysis: expected >=1 peeled layer, got ' . json_encode($body['peeled']));
+        }
+        echo "ok: merged analysis: {$body['peeled']['layers']} peeled layer(s) alongside static sink\n";
     }
 
     echo "\nALL PASSED\n";

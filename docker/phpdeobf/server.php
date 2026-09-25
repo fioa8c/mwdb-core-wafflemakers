@@ -17,6 +17,20 @@ use PHPDeobfuscator\Analysis\ReportFormatter;
 ini_set('xdebug.var_display_max_depth', -1);
 ini_set('memory_limit', getenv('PHPDEOBF_MEMORY_LIMIT') ?: '512M');
 ini_set('xdebug.max_nesting_level', 1000);
+// The engine's constant-folder (src/Resolver.php) calls PHP's own
+// defined()/constant() on barewords it finds in the sample being analysed
+// (e.g. a sample that sets up curl options via CURLOPT_* constants). Some of
+// those constants are themselves deprecated in this PHP version, so simply
+// *resolving* one during static analysis fires an E_DEPRECATED notice. The
+// built-in server's SAPI is "cli-server", not "cli", so display_errors=stderr
+// isn't honored there (PHP only special-cases the plain CLI SAPI) — the
+// notice is written straight into the HTTP response body ahead of our JSON,
+// corrupting it for any client that parses it strictly, and can even trigger
+// a cascading "headers already sent" warning. Turn display off and rely on
+// log_errors (captured by `docker logs`, via the SAPI's own error log) for
+// visibility instead of the response body.
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 set_time_limit(120);
 
 $MAX_INPUT_BYTES = (int) (getenv('MAX_INPUT_BYTES') ?: 5 * 1024 * 1024);
@@ -120,13 +134,44 @@ try {
     }
 
     if ($options['analyze']) {
-        $analyzed = $peeled !== null ? 'peeled' : 'static';
-        $codeToAnalyze = $peeled !== null ? $peeled['output'] : $output;
-        $deobf = new Deobfuscator();
-        $findings = $deobf->analyze($codeToAnalyze, $peeled !== null ? null : $tree);
         $formatter = new ReportFormatter();
-        $analysis = json_decode($formatter->formatJson($findings, basename($filename)), true);
-        $analysis['analyzed'] = $analyzed;
+
+        $findingsStatic = (new Deobfuscator())->analyze($output, $tree);
+        $analysis = json_decode($formatter->formatJson($findingsStatic, basename($filename)), true);
+        foreach (['sources', 'sinks', 'errors'] as $section) {
+            foreach ($analysis[$section] as &$finding) {
+                $finding['origin'] = 'static';
+            }
+            unset($finding);
+        }
+
+        if ($peeled !== null) {
+            $findingsPeeled = (new Deobfuscator())->analyze($peeled['output'], null);
+            $peeledPayload = json_decode($formatter->formatJson($findingsPeeled, basename($filename)), true);
+            foreach (['sources', 'sinks', 'errors'] as $section) {
+                foreach ($peeledPayload[$section] as &$finding) {
+                    $finding['origin'] = 'peeled';
+                }
+                unset($finding);
+            }
+
+            foreach (['sources', 'sinks', 'errors'] as $section) {
+                $analysis[$section] = array_merge($analysis[$section], $peeledPayload[$section]);
+            }
+            $analysis['summary']['source_count'] += $peeledPayload['summary']['source_count'];
+            $analysis['summary']['sink_count'] += $peeledPayload['summary']['sink_count'];
+            $analysis['summary']['auto_exec_count'] += $peeledPayload['summary']['auto_exec_count'];
+            $categories = $analysis['summary']['categories_present'];
+            foreach ($peeledPayload['summary']['categories_present'] as $cat) {
+                if (!in_array($cat, $categories, true)) {
+                    $categories[] = $cat;
+                }
+            }
+            $analysis['summary']['categories_present'] = $categories;
+            $analysis['analyzed'] = 'static+peeled';
+        } else {
+            $analysis['analyzed'] = 'static';
+        }
     }
 } catch (\PhpParser\Error $e) {
     emit_error('parse_error', $e->getMessage());

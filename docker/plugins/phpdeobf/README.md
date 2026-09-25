@@ -59,7 +59,7 @@ Option keys (also the sidecar's option keys, unchanged end to end):
 | `eval_peel` | Run the sample under the `php-eval-hook` extension in a hardened sandbox and capture each `eval()` layer. Silently downgraded to `false` when the sidecar has no eval-hook extension built in. |
 | `remove_dead_code` | Drop assignments to variables the reduced code never reads. |
 | `rename_vars` | Give obfuscated-looking variables readable names when the code proves their role. |
-| `analyze` | Run the security-analysis pass (sources/sinks/auto-exec) over the (peeled, if present, else static) output and store it. |
+| `analyze` | Run the security-analysis pass (sources/sinks/auto-exec) over the static output, and additionally over the peeled output when `eval_peel` captured layers, then merge both into one report and store it. |
 
 ## Sidecar API
 
@@ -91,7 +91,7 @@ Response (HTTP 200, `status: "ok"`):
 |---|---|---|
 | `output` | string | The deobfuscated source. Always present. |
 | `peeled` | `{output, layers, secs}` \| `null` | Present only when `eval_peel` ran and captured ≥1 layer. `layers` is an int, `secs` the peel wall-clock time. |
-| `analysis` | object \| `null` | Present only when `analyze` was requested. Has `sources`, `sinks`, `errors`, `summary` (`source_count`, `sink_count`, `auto_exec_count`, `categories_present`), and `analyzed` (`"peeled"` or `"static"`, whichever output was scanned). |
+| `analysis` | object \| `null` | Present only when `analyze` was requested. Has `sources`, `sinks`, `errors` (each finding carries an `origin` of `"static"` or `"peeled"` marking which output it came from), `summary` (`source_count`, `sink_count`, `auto_exec_count`, `categories_present`, summed/unioned across origins), and `analyzed` (`"static"` when only the static output was scanned, `"static+peeled"` when the peeled output was scanned too and merged in — this always includes the static pass, so a sink outside the `eval()` call isn't dropped just because peeling also ran). |
 | `warnings` | array of `{code, message}` | See warning codes below. |
 | `options` | object | The (defaulted) options the sidecar actually used. |
 | `engine` | `{phpdeobf, evalhook_available}` | `phpdeobf` is the vendored engine's short commit hash (from `VERSION`), or `"unknown"`. |
@@ -148,9 +148,10 @@ show the layer count without re-parsing the blob.
 
 Each category in `analysis.summary.categories_present` is recorded as a
 `phpdeobf_sink` attribute (key `phpdeobf_sink`, value the category name,
-e.g. `os_exec`) on the sample, with permission checks off — see
-`attributes.py`. The attribute definition is created on demand the first
-time it's used. Categories map to the sink groups documented in
+e.g. `os_exec`) on the sample, with permission checks off — the
+`check_permissions=False` argument to `sample.add_attribute(...)` in
+`resource.py`'s `post()`. The attribute definition is created on demand the
+first time it's used. Categories map to the sink groups documented in
 `docker/phpdeobf/README.md`'s "Security analysis" section (`code_exec`,
 `os_exec`, `dynamic_inc`, `dispatch`, `deser`, `file_write`, `network`,
 `mail`, `header_inj`, `obfusc`).
