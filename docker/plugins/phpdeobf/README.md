@@ -5,7 +5,19 @@ bytes to the `phpdeobf` sidecar (a hardened HTTP wrapper around the
 PHPDeobfuscator engine vendored under `docker/phpdeobf/`) and stores the
 results as `TextBlob` children of the sample.
 
-See spec: `docs/superpowers/specs/2026-04-29-phpdeobf-plugin-design.md`.
+Specs: `docs/superpowers/specs/2026-04-29-phpdeobf-plugin-design.md` (the
+original plugin) and `docs/superpowers/specs/2026-09-25-phpdeobf-refresh-design.md`
+(presets, eval-hook peeling, analysis, hardening).
+
+## Engine dependency
+
+The vendored engine must include `src/Pipeline.php`, which `server.php`
+calls for every run. That class comes from PHPDeobfuscator PR
+https://github.com/fioa8c/PHPDeobfuscator/pull/17 (branch `pipeline-class`),
+which is not merged yet; `sync-from-source.sh` refuses to sync from a
+checkout that lacks it. `docker/phpdeobf/VERSION` records the synced commit
+(currently `6f13ff83fd6b`, from that branch). After the PR merges, re-run
+the sync from the source repo's `master` and commit the new `VERSION`.
 
 ## The tab
 
@@ -56,7 +68,7 @@ Option keys (also the sidecar's option keys, unchanged end to end):
 |---|---|
 | `strip_comments` | Strip comments from the input before reducing. |
 | `execute_pure` | Execute provably-pure user functions in a sandboxed subprocess to resolve decoder calls the static reducer can't fold (`-x` in the engine CLI). |
-| `eval_peel` | Run the sample under the `php-eval-hook` extension in a hardened sandbox and capture each `eval()` layer. Silently downgraded to `false` when the sidecar has no eval-hook extension built in. |
+| `eval_peel` | Run the sample under the `php-eval-hook` extension in a hardened sandbox and capture each `eval()` layer. When peeling cannot run or captures nothing, the response carries a warning (see warning codes below), `peeled` is `null` and `options.eval_peel` is still reported as `true`. |
 | `remove_dead_code` | Drop assignments to variables the reduced code never reads. |
 | `rename_vars` | Give obfuscated-looking variables readable names when the code proves their role. |
 | `analyze` | Run the security-analysis pass (sources/sinks/auto-exec) over the static output, and additionally over the peeled output when `eval_peel` captured layers, then merge both into one report and store it. |
@@ -122,9 +134,10 @@ Warning codes (`warnings[].code`), all non-fatal — the response is still
 {"status": "ok", "evalhook_available": true, "phpdeobf": "6f13ff83fd6b"}
 ```
 
-`evalhook_available` reflects whether the `evalhook.so` extension is loaded
-in *this* sidecar process; `phpdeobf` is the same engine version string as
-in `POST /deobfuscate`'s `engine.phpdeobf`.
+`evalhook_available` is a file check: it is `true` when `evalhook.so` exists
+at `PHPDEOBF_EVALHOOK`. The server process itself never loads the
+extension; only the sandboxed peel worker it spawns does. `phpdeobf` is the
+same engine version string as in `POST /deobfuscate`'s `engine.phpdeobf`.
 
 The MWDB-side resource proxies both endpoints as `POST /phpdeobf/<hash>` and
 `GET /phpdeobf/health`, mapping a transport failure or unhealthy sidecar to
@@ -132,9 +145,10 @@ HTTP 503 on either.
 
 ## Storage
 
-On a successful sidecar call, the resource creates or reuses (dedupe is by
-content + blob name + parent, via `TextBlob.get_or_create`) up to three
-`TextBlob` children of the sample:
+On a successful sidecar call, the resource creates or reuses up to three
+`TextBlob` children of the sample. Dedupe (via `TextBlob.get_or_create`) is
+by content only: a blob whose content hash already exists is reused, whatever
+its name, and linked to this sample as a child.
 
 | Blob | `blob_type` | Created when |
 |---|---|---|
@@ -150,15 +164,21 @@ Each category in `analysis.summary.categories_present` is recorded as a
 `phpdeobf_sink` attribute (key `phpdeobf_sink`, value the category name,
 e.g. `os_exec`) on the sample, with permission checks off — the
 `check_permissions=False` argument to `sample.add_attribute(...)` in
-`resource.py`'s `post()`. The attribute definition is created on demand the
-first time it's used. Categories map to the sink groups documented in
+`resource.py`'s `post()`. The attribute definition is created at plugin
+startup, which also grants the `registered` group read access to it
+(`can_read=True`, `can_set=False`) so non-admin users can read the values
+and search `attribute.phpdeobf_sink:...`; both steps are idempotent and are
+skipped (with a warning, not retried until the next startup) if the database
+is not ready. Categories map to the sink groups documented in
 `docker/phpdeobf/README.md`'s "Security analysis" section (`code_exec`,
 `os_exec`, `dynamic_inc`, `dispatch`, `deser`, `file_write`, `network`,
 `mail`, `header_inj`, `obfusc`).
 
 A second call with identical input and options is a no-op from the caller's
 perspective: `created`/`peeled_created`/`analysis_created` all come back
-`false` and no duplicate blobs or attributes are added.
+`false` and no duplicate blobs or attributes are added. (The peel header's
+wall-clock time is stripped by the sidecar so the peeled blob's content is
+deterministic; `peeled.secs` still carries the timing.)
 
 ## Configuration
 
@@ -177,6 +197,13 @@ The plugin (Python side) enforces a matching 5 MB cap on the sample before
 it even reaches the sidecar (defense-in-depth) and a 90 s wall-clock timeout
 on the HTTP call itself (`resource.py`'s `SIDECAR_TIMEOUT`).
 
+**Timeout chain.** Each hop gives up before the one in front of it, so a
+slow sample yields a clean error instead of a killed worker or a 504:
+sidecar `set_time_limit(60)` (in `server.php`) < plugin client 90 s <
+gunicorn worker `--timeout 120` (`GUNICORN_CMD_ARGS` on the `mwdb` service in
+both compose files) and nginx `proxy_read_timeout 120s` (the `/api/` block of
+`docker/nginx.conf.template`, used by the `mwdb-web` image).
+
 **Dropped: `PHPDEOBF_PURE_TIMEOUT`.** The `execute_pure` pass (pure-function
 sandbox execution) has its own wall-clock timeout, but it is **not**
 configurable via an env var — it's `PureFunctionExecutor::TIMEOUT_SECONDS`,
@@ -190,7 +217,11 @@ plan called for a `PHPDEOBF_PURE_TIMEOUT` env var mirroring
 `docker/phpdeobf/Dockerfile.server` builds the `evalhook.so` extension in a
 separate `builder` stage (`phpize && ./configure --enable-evalhook && make`)
 and copies only the compiled `.so` and the app into the final `php:8.5-cli-bookworm`
-image, which runs as `USER nobody`. The `phpdeobf` service in
+image, which runs as `USER nobody`. The final image still contains `gcc`/`make`
+(inherited from the official base image, not added here); that is harmless
+with the read-only root filesystem and `noexec` `/tmp`. The image sets
+`PHP_CLI_SERVER_WORKERS=2`, so the built-in server handles two requests at
+once and one long run cannot block `GET /health`. The `phpdeobf` service in
 `compose/compose.with-plugins.yml` (and the equivalent block in
 `docker-compose-prod.yml`) locks it down further:
 
@@ -203,8 +234,9 @@ image, which runs as `USER nobody`. The `phpdeobf` service in
 - Attached only to `phpdeobf-net`, an `internal: true` Docker network with
   no route to the outside world or to any other service network — the mwdb
   service joins `phpdeobf-net` in addition to `default` so it alone can
-  reach the sidecar; the sidecar itself cannot reach anything, including the
-  Postgres/Redis/mwdb services it shares a host with.
+  reach the sidecar. The sidecar cannot reach the internet, Postgres or
+  Redis, but it can reach `mwdb:8080` (gunicorn) over `phpdeobf-net`, since
+  mwdb is attached there too.
 - A `healthcheck` polling `GET /health` (also baked into the image itself).
 
 ## Vendored source

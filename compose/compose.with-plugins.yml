@@ -4,6 +4,8 @@ services:
     environment:
       MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib"
       MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
+      # Above the phpdeobf plugin's 90 s sidecar timeout (see its README).
+      GUNICORN_CMD_ARGS: "--timeout 120"
     networks:
       - default
       - phpdeobf-net

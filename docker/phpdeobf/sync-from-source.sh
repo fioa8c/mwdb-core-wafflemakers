@@ -30,6 +30,7 @@ if [[ "$DIRTY_COUNT" != "0" && "$ALLOW_DIRTY" != "1" ]]; then
   echo "source tree has $DIRTY_COUNT modified tracked file(s); commit them or pass --allow-dirty" >&2
   exit 1
 fi
+[[ -f "$SRC/src/Pipeline.php" ]] || { echo "source lacks src/Pipeline.php (PHPDeobfuscator PR #17 not merged/checked out?)" >&2; exit 1; }
 COMMIT="$(git -C "$SRC" rev-parse --short=12 HEAD)"
 
 rsync -a --delete \
