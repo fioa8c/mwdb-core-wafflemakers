@@ -37,12 +37,31 @@ services:
       - MWDB_PHPDEOBF_URL=http://phpdeobf:8080
     volumes:
       - mwdb-uploads:/app/uploads
+    networks:
+      - default
+      - phpdeobf-net
 
   phpdeobf:
     build:
       context: ./docker/phpdeobf
       dockerfile: Dockerfile.server
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    mem_limit: 2g
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "65534:65534"
+    networks:
+      - phpdeobf-net
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/health') === false ? 1 : 0);"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
 
   threatlib-sync:
     build:
@@ -100,3 +119,7 @@ volumes:
   mwdb-uploads:
   threatlib-repo:
   letsencrypt:
+
+networks:
+  phpdeobf-net:
+    internal: true
