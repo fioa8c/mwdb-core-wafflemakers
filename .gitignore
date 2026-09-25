@@ -19,8 +19,16 @@ postgres-vars.env
 docker/plugins/*/
 !docker/plugins/yarax_regex/
 !docker/plugins/phpdeobf/
+!docker/plugins/threatlib/
 docker/mail_templates/
 tests/frontend/cypress/videos/
 tests/frontend/cypress/screenshots/
 build/
 dist/
+
+# superpowers SDD scratch workspaces
+.superpowers/
+
+# threatlib-sync dev/prod local state
+dev-threatlib-origin.git/
+secrets/

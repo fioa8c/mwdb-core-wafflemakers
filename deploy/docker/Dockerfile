@@ -45,9 +45,10 @@ LABEL maintainer="info@cert.pl"
 #   postgresql-client — psql CLI used by mwdb-core's startup checks
 #   libmagic1         — file type detection (was apk libmagic)
 #   libfuzzy2         — ssdeep runtime (same name on Debian)
+#   wget              — used by docker-compose.yml's healthcheck
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       libpq5 postgresql-client libmagic1 libfuzzy2 \
+       libpq5 postgresql-client libmagic1 libfuzzy2 wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the application from the builder.
