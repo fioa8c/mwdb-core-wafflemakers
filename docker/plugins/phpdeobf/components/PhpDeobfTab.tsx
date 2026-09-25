@@ -6,8 +6,10 @@ import { negateBuffer } from "@mwdb-web/commons/helpers";
 import { ObjectContext } from "@mwdb-web/components/ShowObject";
 import type { ObjectData } from "@mwdb-web/types/types";
 
-import { deobfuscate, isOk } from "../api";
-import type { DeobfResult } from "../api";
+import { deobfuscate, fullPreset, health as fetchHealth, isOk } from "../api";
+import type { DeobfBody, DeobfOptions, DeobfResult } from "../api";
+import { AnalysisPanel } from "./AnalysisPanel";
+import { OptionsPanel } from "./OptionsPanel";
 
 const MAX_SAMPLE_SIZE = 5 * 1024 * 1024;
 
@@ -16,6 +18,21 @@ type State =
     | { kind: "running" }
     | { kind: "done"; result: DeobfResult }
     | { kind: "unavailable" };
+
+type HealthState =
+    | null
+    | "unavailable"
+    | { status: "ok"; evalhook_available: boolean; phpdeobf: string };
+
+// eval_peel_error is intentionally absent here — its own message is shown
+// verbatim (see the warnings render below).
+const WARNING_TEXT: Record<string, string> = {
+    eval_peel_unavailable:
+        "Peeling skipped: the eval-hook extension is not available in this sidecar.",
+    eval_peel_no_layers:
+        "Peeling captured no eval() layers; showing static output.",
+    eval_peel_timeout: "Peeling timed out; showing static output.",
+};
 
 /** Heuristic: does this sample look like PHP? */
 function looksLikePhp(text: string, fileName: string | undefined): boolean {
@@ -29,6 +46,10 @@ function shortHash(h: string): string {
     return h.length > 12 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h;
 }
 
+function isAbort(err: { name?: string }): boolean {
+    return err.name === "CanceledError" || err.name === "AbortError";
+}
+
 export function PhpDeobfTab() {
     const api = useContext(APIContext);
     const objectContext = useContext(ObjectContext);
@@ -40,7 +61,16 @@ export function PhpDeobfTab() {
     const [state, setState] = useState<State>({ kind: "idle" });
     const [sampleHead, setSampleHead] = useState<string>("");
     const [runAnyway, setRunAnyway] = useState(false);
+    const [healthState, setHealthState] = useState<HealthState>(null);
+    const [advanced, setAdvanced] = useState(false);
+    const [options, setOptions] = useState<DeobfOptions>(() => fullPreset(""));
+    const optionsTouchedRef = useRef(false);
     const abortRef = useRef<AbortController | null>(null);
+
+    const evalhookAvailable =
+        healthState !== null &&
+        healthState !== "unavailable" &&
+        healthState.evalhook_available;
 
     // Abort any in-flight request when the component unmounts or the sample changes,
     // so a late response doesn't try to setState on an unmounted component.
@@ -49,6 +79,23 @@ export function PhpDeobfTab() {
             abortRef.current?.abort();
         };
     }, [sampleId]);
+
+    // Fetch sidecar health (engine version, eval-hook availability) on mount.
+    useEffect(() => {
+        const ctrl = new AbortController();
+        (async () => {
+            try {
+                const h = await fetchHealth(api.axios, ctrl.signal);
+                if (ctrl.signal.aborted) return;
+                setHealthState(h);
+            } catch (e: unknown) {
+                if (ctrl.signal.aborted) return;
+                if (isAbort(e as { name?: string })) return;
+                setHealthState("unavailable");
+            }
+        })();
+        return () => ctrl.abort();
+    }, [api]);
 
     // Fetch a small slice of the sample for the heuristic check on mount.
     useEffect(() => {
@@ -59,7 +106,7 @@ export function PhpDeobfTab() {
                 const resp = await api.downloadFile(sampleId, 1);
                 const bytes = negateBuffer(resp.data);
                 const text = new TextDecoder("utf-8", { fatal: false }).decode(
-                    bytes.slice(0, 2048),
+                    bytes.slice(0, 2048)
                 );
                 if (!cancelled) setSampleHead(text);
             } catch {
@@ -72,24 +119,38 @@ export function PhpDeobfTab() {
         };
     }, [api, sampleId]);
 
+    // Pre-fill the advanced options panel from the full preset once the sample
+    // head (and engine health) are known, unless the user has already touched
+    // a switch themselves — a later refinement of either shouldn't clobber
+    // their choices.
+    useEffect(() => {
+        if (optionsTouchedRef.current) return;
+        const preset = fullPreset(sampleHead);
+        if (!evalhookAvailable) preset.eval_peel = false;
+        setOptions(preset);
+    }, [sampleHead, evalhookAvailable]);
+
     const isPhpLike = useMemo(
         () => looksLikePhp(sampleHead, fileName),
-        [sampleHead, fileName],
+        [sampleHead, fileName]
     );
     const isOversize =
         typeof fileSize === "number" && fileSize > MAX_SAMPLE_SIZE;
     const buttonDisabled =
-        isOversize ||
-        state.kind === "running" ||
-        (!isPhpLike && !runAnyway);
+        isOversize || state.kind === "running" || (!isPhpLike && !runAnyway);
 
-    async function onRun() {
+    async function runWith(body: DeobfBody) {
         abortRef.current?.abort();
         const ctrl = new AbortController();
         abortRef.current = ctrl;
         setState({ kind: "running" });
         try {
-            const result = await deobfuscate(api.axios, sampleId, ctrl.signal);
+            const result = await deobfuscate(
+                api.axios,
+                sampleId,
+                body,
+                ctrl.signal
+            );
             if (ctrl.signal.aborted) return;
             setState({ kind: "done", result });
         } catch (e: unknown) {
@@ -99,7 +160,7 @@ export function PhpDeobfTab() {
                 response?: { status?: number; data?: { message?: string } };
                 message?: string;
             };
-            if (err.name === "CanceledError" || err.name === "AbortError") {
+            if (isAbort(err)) {
                 return;
             }
             if (err.response?.status === 503) {
@@ -119,10 +180,39 @@ export function PhpDeobfTab() {
         }
     }
 
+    function onRun() {
+        runWith({ preset: "full" });
+    }
+
+    function onRunAdvanced() {
+        const opts = evalhookAvailable
+            ? options
+            : { ...options, eval_peel: false };
+        runWith({ preset: "custom", options: opts });
+    }
+
+    function onOptionsChange(next: DeobfOptions) {
+        optionsTouchedRef.current = true;
+        setOptions(next);
+    }
+
     return (
         <div style={{ padding: "20px", maxWidth: "800px" }}>
             <h4>PHP Deobfuscator</h4>
-
+            <div className="mb-2">
+                <small className="text-muted">
+                    {healthState === null && "Checking engine…"}
+                    {healthState === "unavailable" && "Engine unavailable"}
+                    {healthState !== null && healthState !== "unavailable" && (
+                        <>
+                            Engine {healthState.phpdeobf} · eval-hook{" "}
+                            {healthState.evalhook_available
+                                ? "available"
+                                : "unavailable"}
+                        </>
+                    )}
+                </small>
+            </div>
             {!isPhpLike && (
                 <div
                     style={{
@@ -144,7 +234,6 @@ export function PhpDeobfTab() {
                     </label>
                 </div>
             )}
-
             {isOversize && (
                 <div
                     style={{
@@ -159,7 +248,6 @@ export function PhpDeobfTab() {
                     deobfuscator only accepts samples up to that size.
                 </div>
             )}
-
             <button
                 type="button"
                 className="btn btn-primary"
@@ -171,8 +259,23 @@ export function PhpDeobfTab() {
                     : state.kind === "done"
                       ? "Run again"
                       : "Deobfuscate"}
+            </button>{" "}
+            <button
+                type="button"
+                className="btn btn-link btn-sm"
+                onClick={() => setAdvanced((v) => !v)}
+            >
+                {advanced ? "Hide advanced options" : "Advanced"}
             </button>
-
+            {advanced && (
+                <OptionsPanel
+                    value={options}
+                    onChange={onOptionsChange}
+                    evalhookAvailable={evalhookAvailable}
+                    disabled={buttonDisabled}
+                    onRun={onRunAdvanced}
+                />
+            )}
             <div style={{ marginTop: "16px" }}>
                 {state.kind === "running" && <em>Running deobfuscator…</em>}
 
@@ -192,31 +295,48 @@ export function PhpDeobfTab() {
                 )}
 
                 {state.kind === "done" && isOk(state.result) && (
-                    <div
-                        style={{
-                            background: "#d4edda",
-                            border: "1px solid #c3e6cb",
-                            padding: "10px 14px",
-                            borderRadius: "4px",
-                            color: "#155724",
-                        }}
-                    >
-                        {state.result.created
-                            ? "Created child blob "
-                            : "Already deobfuscated — opening existing child blob: "}
-                        <Link to={`/blob/${state.result.blob_id}`}>
-                            {shortHash(state.result.blob_id)}
-                        </Link>
-                        <span
-                            style={{
-                                color: "#155724aa",
-                                marginLeft: "10px",
-                                fontSize: "0.9em",
-                            }}
-                        >
-                            ({state.result.elapsed_ms} ms)
-                        </span>
-                    </div>
+                    <>
+                        <div className="mb-2">
+                            <strong>{state.result.elapsed_ms} ms</strong>
+                            {" · "}
+                            static output
+                            {state.result.peeled_blob_id && " · peeled output"}
+                            {state.result.analysis_blob_id && " · analysis"}
+                        </div>
+
+                        {state.result.warnings.map((w, i) => (
+                            <div
+                                className="alert alert-warning"
+                                key={`${w.code}-${i}`}
+                            >
+                                {WARNING_TEXT[w.code] ?? w.message}
+                            </div>
+                        ))}
+
+                        <div className="mb-2">
+                            {state.result.created
+                                ? "Created child blob "
+                                : "Already deobfuscated — opening existing child blob: "}
+                            <Link to={`/blob/${state.result.blob_id}`}>
+                                {shortHash(state.result.blob_id)}
+                            </Link>
+                        </div>
+
+                        {state.result.peeled_blob_id && (
+                            <div className="mb-2">
+                                {state.result.peeled_created
+                                    ? "Created peeled blob "
+                                    : "Already peeled — opening existing peeled blob: "}
+                                <Link
+                                    to={`/blob/${state.result.peeled_blob_id}`}
+                                >
+                                    {shortHash(state.result.peeled_blob_id)}
+                                </Link>
+                            </div>
+                        )}
+
+                        <AnalysisPanel result={state.result} />
+                    </>
                 )}
 
                 {state.kind === "done" && !isOk(state.result) && (
