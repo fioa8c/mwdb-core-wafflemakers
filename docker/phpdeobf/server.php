@@ -31,7 +31,9 @@ ini_set('xdebug.max_nesting_level', 1000);
 // visibility instead of the response body.
 ini_set('display_errors', '0');
 ini_set('log_errors', '1');
-set_time_limit(120);
+// Timeout chain: this 60 s budget < the plugin client's 90 s < gunicorn and
+// nginx's 120 s, so a slow sample fails here first with a clean error.
+set_time_limit(60);
 
 $MAX_INPUT_BYTES = (int) (getenv('MAX_INPUT_BYTES') ?: 5 * 1024 * 1024);
 $PEEL_TIMEOUT = (int) (getenv('PHPDEOBF_PEEL_TIMEOUT') ?: 10);
@@ -47,7 +49,13 @@ function engine_version() {
 function emit($status, $payload) {
     http_response_code($status);
     header('Content-Type: application/json');
-    echo json_encode($payload);
+    $json = json_encode($payload, JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($json === false) {
+        error_log('phpdeobf: response not serialisable: ' . json_last_error_msg());
+        http_response_code(200);
+        $json = '{"status":"error","code":"internal_error","message":"response not serialisable"}';
+    }
+    echo $json;
     exit;
 }
 
@@ -122,6 +130,10 @@ try {
                 $peelError, ['timeout' => $PEEL_TIMEOUT]
             );
             if ($peeledOut !== null) {
+                // The header carries the peel's wall-clock time; drop it so the
+                // peeled output (and the TextBlob made from it) is deterministic
+                // and dedupes across runs. `secs` below keeps the timing.
+                $peeledOut = preg_replace('/ captured in [\d.]+s\./', '.', $peeledOut, 1);
                 $layers = preg_match_all('/^\/\/ ===== eval\(\) layer \d+/m', $peeledOut);
                 $peeled = ['output' => $peeledOut, 'layers' => $layers, 'secs' => round(microtime(true) - $t0, 2)];
             } else {

@@ -26,6 +26,8 @@ FROM php:8.5-cli-bookworm
 COPY --from=builder /out/evalhook/evalhook.so /usr/local/lib/php/evalhook/evalhook.so
 COPY --from=builder --chown=nobody:nogroup /app /app
 ENV PHPDEOBF_EVALHOOK=/usr/local/lib/php/evalhook/evalhook.so
+# Two built-in-server workers so one long deobfuscation cannot block /health.
+ENV PHP_CLI_SERVER_WORKERS=2
 WORKDIR /app
 USER nobody
 EXPOSE 8080

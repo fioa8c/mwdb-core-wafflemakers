@@ -69,6 +69,7 @@ def test_phpdeobf_creates_child_blob_and_dedupes(admin_session):
         f"Expected created=False on second call, got: {body2}"
     )
     assert body2["blob_id"] == blob_id
+    assert body2["peeled_created"] in (False, None), body2
 
 
 def test_full_preset_creates_analysis_and_sink_attribute(admin_session):
@@ -96,6 +97,7 @@ def test_full_preset_creates_analysis_and_sink_attribute(admin_session):
     # second run: nothing new
     body2 = admin_session.session.post(admin_session.mwdb_url + f"/phpdeobf/{sid}", json={"preset": "full"}).json()
     assert body2["created"] is False and body2["analysis_created"] is False
+    assert body2["peeled_created"] in (False, None), body2
 
 
 def test_health_endpoint(admin_session):
