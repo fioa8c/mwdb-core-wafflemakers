@@ -246,6 +246,22 @@ git pull
 docker compose -f docker-compose-prod.yml up -d --build
 ```
 
+### Recomputing file types
+
+`file_type` is computed once, at upload, by libmagic plus the PHP refinement
+in `mwdb/core/filetype.py` (a PHP open tag anywhere in the file makes it
+`PHP script, ...`). Stored values do not change on their own, so re-run this
+after deploying an image with a newer libmagic, or after changing that
+refinement:
+
+```bash
+docker compose -f docker-compose-prod.yml run --rm -e MWDB_ENABLE_HOOKS=0 mwdb mwdb-core recompute-file-types
+```
+
+Add `--dry-run` first to list what would change without writing anything, and
+`--limit N` to examine only the first N files. It reads every stored file, so
+expect it to take a while on a large instance; it is safe to re-run.
+
 ### View logs
 
 ```bash
