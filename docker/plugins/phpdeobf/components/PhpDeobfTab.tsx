@@ -332,6 +332,8 @@ export function PhpDeobfTab() {
                                 >
                                     {shortHash(state.result.peeled_blob_id)}
                                 </Link>
+                                {state.result.peeled_layers !== null &&
+                                    ` (${state.result.peeled_layers} layer(s))`}
                             </div>
                         )}
 

@@ -98,9 +98,11 @@ class PhpDeobfResource(Resource):
             200:
                 description: |
                     ok with blob_id/peeled_blob_id/analysis_blob_id (any of
-                    the latter two may be null) plus analysis_summary,
-                    warnings, engine and the options sent to the sidecar,
-                    OR sidecar error pass-through
+                    the latter two may be null) plus peeled_layers (the
+                    number of eval() layers captured, or null when no
+                    peeled blob was stored), analysis_summary, warnings,
+                    engine and the options sent to the sidecar, OR sidecar
+                    error pass-through
             400:
                 description: Bad preset or options body
             404:
@@ -237,6 +239,9 @@ class PhpDeobfResource(Resource):
                 "created": bool(created),
                 "peeled_blob_id": peeled_blob.dhash if peeled_blob else None,
                 "peeled_created": bool(peeled_created) if peeled_blob else None,
+                "peeled_layers": (
+                    int(result.peeled["layers"]) if peeled_blob else None
+                ),
                 "analysis_blob_id": analysis_blob.dhash if analysis_blob else None,
                 "analysis_created": bool(analysis_created) if analysis_blob else None,
                 "analysis_summary": summary,

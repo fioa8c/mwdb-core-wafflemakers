@@ -47,6 +47,7 @@ export type DeobfOk = {
     created: boolean;
     peeled_blob_id: string | null;
     peeled_created: boolean | null;
+    peeled_layers: number | null;
     analysis_blob_id: string | null;
     analysis_created: boolean | null;
     analysis_summary: {

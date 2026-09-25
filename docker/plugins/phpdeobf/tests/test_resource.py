@@ -223,6 +223,7 @@ def test_full_preset_stores_three_blobs_and_attributes(app, client):
     assert body["status"] == "ok"
     assert body["blob_id"].startswith("deobfuscated-php0")
     assert body["peeled_blob_id"].startswith("deobfuscated-php-evalpeel")
+    assert body["peeled_layers"] == 2
     assert body["analysis_blob_id"].startswith("phpdeobf-analysis")
     assert body["analysis_summary"]["categories_present"] == ["os_exec", "code_exec"]
     assert body["engine"]["phpdeobf"] == "abc123"
@@ -251,6 +252,7 @@ def test_static_preset_sends_all_off_and_stores_only_output(app, client):
     resp = client.post("/api/phpdeobf/abc123", json={"preset": "static"})
     body = resp.get_json()
     assert body["peeled_blob_id"] is None and body["analysis_blob_id"] is None
+    assert body["peeled_layers"] is None
     assert body["analysis_summary"] is None
     assert all(v is False for v in app.fake_client.deobfuscate.call_args.kwargs["options"].values())
     fake_file.add_attribute.assert_not_called()
