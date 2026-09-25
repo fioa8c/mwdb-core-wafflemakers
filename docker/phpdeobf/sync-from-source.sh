@@ -1,37 +1,52 @@
 #!/usr/bin/env bash
-# Refresh the vendored PHPDeobfuscator source from ~/WORK/PHPDeobfuscator/.
+# Refresh the vendored PHPDeobfuscator engine from ~/WORK/PHPDeobfuscator/.
 #
-# Run from repo root:  bash docker/phpdeobf/sync-from-source.sh
-# Run from anywhere:   <repo>/docker/phpdeobf/sync-from-source.sh
+#   bash docker/phpdeobf/sync-from-source.sh [--allow-dirty]
+#   PHPDEOBF_SRC=/path/to/PHPDeobfuscator bash docker/phpdeobf/sync-from-source.sh
 #
-# After running, review the diff and commit.
-
+# Sidecar-owned files are preserved (see the exclude list). The source repo's
+# untracked research artefacts (out/, report/, bin/, samples/, docs/, stray
+# tarballs) and its composer.lock are never copied: the fork keeps its own
+# composer.lock so the image build is reproducible from the fork alone.
+# Writes VERSION with the source commit so the sidecar can report it.
 set -euo pipefail
 
 SRC="${PHPDEOBF_SRC:-$HOME/WORK/PHPDeobfuscator}"
 DST="$(cd "$(dirname "$0")" && pwd)"
+ALLOW_DIRTY=0
+[[ "${1:-}" == "--allow-dirty" ]] && ALLOW_DIRTY=1
 
-if [[ ! -d "$SRC" ]]; then
-  echo "source not found: $SRC" >&2
+if [[ ! -d "$SRC/.git" ]]; then
+  echo "source not found or not a git checkout: $SRC" >&2
   echo "set PHPDEOBF_SRC=/path/to/PHPDeobfuscator to override" >&2
   exit 1
 fi
 
-# Preserve sidecar-only files (server.php, Dockerfile.server, this script,
-# tests/, .gitignore) by listing them as excludes — rsync --delete would
-# otherwise wipe them.
-#
-# Also exclude upstream's CLAUDE.md / .htaccess / Dockerfile — these were
-# removed in code review (see plan Task 1) because they conflict with or
-# confuse the fork's setup. Re-syncing without these excludes would bring
-# them back.
+DIRTY_COUNT="$(git -C "$SRC" status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
+if [[ "$DIRTY_COUNT" != "0" && "$ALLOW_DIRTY" != "1" ]]; then
+  echo "source tree has $DIRTY_COUNT modified tracked file(s); commit them or pass --allow-dirty" >&2
+  exit 1
+fi
+COMMIT="$(git -C "$SRC" rev-parse --short=12 HEAD)"
+
 rsync -a --delete \
-  --exclude='.git' --exclude='vendor' --exclude='samples' --exclude='docs' \
+  --exclude='.git' --exclude='.worktrees' --exclude='.DS_Store' \
+  --exclude='vendor' --exclude='composer.lock' \
+  --exclude='samples' --exclude='docs' --exclude='bin' --exclude='out' --exclude='report' \
+  --exclude='mago-*.tar.gz' \
   --exclude='server.php' --exclude='Dockerfile.server' \
-  --exclude='sync-from-source.sh' --exclude='tests/server_test.php' \
-  --exclude='.gitignore' \
+  --exclude='sync-from-source.sh' --exclude='sync-evalhook-from-source.sh' \
+  --exclude='evalhook' --exclude='VERSION' \
+  --exclude='tests/server_test.php' --exclude='.gitignore' \
   --exclude='CLAUDE.md' --exclude='.htaccess' --exclude='Dockerfile' \
   "$SRC/" "$DST/"
 
-echo "synced from $SRC to $DST"
-echo "review with: git -C $(git -C "$DST" rev-parse --show-toplevel) diff --stat"
+{
+  echo "$COMMIT"
+  echo "source=$SRC"
+  echo "dirty=$([[ "$DIRTY_COUNT" == "0" ]] && echo no || echo yes)"
+  echo "synced=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$DST/VERSION"
+
+echo "synced PHPDeobfuscator $COMMIT from $SRC to $DST"
+echo "review with: git diff --stat -- $DST"
