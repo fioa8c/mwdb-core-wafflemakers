@@ -19,7 +19,23 @@ ENV UV_LINK_MODE=copy
 # py-tlsh has no PyPI wheels (built from sdist on every platform).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ python3-dev \
+       curl ca-certificates make \
     && rm -rf /var/lib/apt/lists/*
+
+# libmagic built from source: bookworm's libmagic 5.44 classifies many PHP
+# files as "JavaScript source"; 5.46 gets them right. The runtime stage
+# copies the shared library and the compiled magic database from here.
+ARG FILE_VERSION=5.46
+ARG FILE_SHA256=c9cc77c7c560c543135edc555af609d5619dbef011997e988ce40a3d75d86088
+RUN curl -fsSL -o /tmp/file.tar.gz "https://astron.com/pub/file/file-${FILE_VERSION}.tar.gz" \
+    && echo "${FILE_SHA256}  /tmp/file.tar.gz" | sha256sum -c - \
+    && tar xzf /tmp/file.tar.gz -C /tmp \
+    && cd "/tmp/file-${FILE_VERSION}" \
+    && ./configure --prefix=/usr/local --disable-static --disable-libseccomp \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/file.tar.gz "/tmp/file-${FILE_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
@@ -43,13 +59,20 @@ LABEL maintainer="info@cert.pl"
 # Runtime libraries:
 #   libpq5            — PostgreSQL client lib (psycopg2 runtime)
 #   postgresql-client — psql CLI used by mwdb-core's startup checks
-#   libmagic1         — file type detection (was apk libmagic)
+#   (libmagic: built from source in the builder stage, copied below)
 #   libfuzzy2         — ssdeep runtime (same name on Debian)
 #   wget              — used by docker-compose.yml's healthcheck
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       libpq5 postgresql-client libmagic1 libfuzzy2 wget \
+       libpq5 postgresql-client libfuzzy2 wget \
     && rm -rf /var/lib/apt/lists/*
+
+# libmagic 5.46 from the builder stage (see there); ldconfig makes it
+# the one python-magic finds, and its compiled-in default database path
+# is /usr/local/share/misc/magic.mgc.
+COPY --from=builder /usr/local/lib/libmagic.so.1* /usr/local/lib/
+COPY --from=builder /usr/local/share/misc/magic.mgc /usr/local/share/misc/magic.mgc
+RUN ldconfig
 
 # Copy the application from the builder.
 # Debian's `nobody` user belongs to the `nogroup` group (Alpine had `nobody:nobody`).
