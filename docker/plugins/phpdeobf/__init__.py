@@ -29,7 +29,12 @@ def entrypoint(app_context: "PluginAppContext") -> None:
     try:
         attributes.ensure_attribute_definition()
     except Exception as e:  # schema may not exist yet during `mwdb-core configure`
-        logger.warning("phpdeobf: deferred attribute setup until first request: %s", e)
+        logger.warning(
+            "phpdeobf: skipped %s attribute setup (not retried until the next "
+            "startup): %s",
+            attributes.ATTRIBUTE_KEY,
+            e,
+        )
         try:
             from mwdb.model import db
 
