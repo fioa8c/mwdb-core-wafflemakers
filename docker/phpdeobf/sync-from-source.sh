@@ -5,9 +5,12 @@
 #   PHPDEOBF_SRC=/path/to/PHPDeobfuscator bash docker/phpdeobf/sync-from-source.sh
 #
 # Sidecar-owned files are preserved (see the exclude list). The source repo's
-# untracked research artefacts (out/, report/, bin/, samples/, docs/, stray
+# untracked research artefacts (out/, report/, samples/, docs/, stray
 # tarballs) and its composer.lock are never copied: the fork keeps its own
 # composer.lock so the image build is reproducible from the fork alone.
+# bin/ is mostly ad-hoc research scripts and is excluded, EXCEPT bin/lib/,
+# which the corpus runner (test.php) requires at runtime and so must be
+# vendored into the image.
 # Writes VERSION with the source commit so the sidecar can report it.
 set -euo pipefail
 
@@ -30,14 +33,15 @@ fi
 COMMIT="$(git -C "$SRC" rev-parse --short=12 HEAD)"
 
 rsync -a --delete \
+  --include='bin/' --include='bin/lib/' --include='bin/lib/**' \
   --exclude='.git' --exclude='.worktrees' --exclude='.DS_Store' \
   --exclude='vendor' --exclude='composer.lock' \
-  --exclude='samples' --exclude='docs' --exclude='bin' --exclude='out' --exclude='report' \
+  --exclude='samples' --exclude='docs' --exclude='bin/*' --exclude='out' --exclude='report' \
   --exclude='mago-*.tar.gz' \
   --exclude='server.php' --exclude='Dockerfile.server' \
   --exclude='sync-from-source.sh' --exclude='sync-evalhook-from-source.sh' \
   --exclude='evalhook' --exclude='VERSION' \
-  --exclude='tests/server_test.php' --exclude='.gitignore' \
+  --exclude='tests/server_test.php' --exclude='.gitignore' --exclude='.dockerignore' \
   --exclude='CLAUDE.md' --exclude='.htaccess' --exclude='Dockerfile' \
   "$SRC/" "$DST/"
 
