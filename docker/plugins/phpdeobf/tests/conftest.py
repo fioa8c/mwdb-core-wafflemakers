@@ -61,3 +61,9 @@ if "mwdb.core.hooks" not in sys.modules:
     sys.modules["mwdb.core.hooks"] = _stub
     import mwdb.core as _mwdb_core
     _mwdb_core.hooks = _stub
+
+if "mwdb.model.attribute" not in sys.modules:
+    _stub = MagicMock()
+    sys.modules["mwdb.model.attribute"] = _stub
+    import mwdb.model as _mwdb_model
+    _mwdb_model.attribute = _stub

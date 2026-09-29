@@ -19,19 +19,35 @@ while ($testfile = readdir($d)) {
         exit(1);
     }
     $tests = array();
-    $curTest = array('input' => array(), 'output' => array());
+    $curTest = array('input' => array(), 'output' => array(), 'analysis' => null, 'analysis_text' => null, 'analysis_json' => null, 'options' => array());
     $lines = null;
     while (!feof($f)) {
         $line = fgets($f);
-        if (trim($line) === 'INPUT') {
+        $trim = trim($line);
+        if ($trim === 'INPUT') {
             if ($lines !== null) {
                 $tests[] = $curTest;
-                $curTest = array('input' => array(), 'output' => array());
+                $curTest = array('input' => array(), 'output' => array(), 'analysis' => null, 'analysis_text' => null, 'analysis_json' => null, 'options' => array());
             }
             $lines = &$curTest['input'];
             continue;
-        } elseif (trim($line) === 'OUTPUT') {
+        } elseif ($trim === 'OUTPUT') {
             $lines = &$curTest['output'];
+            continue;
+        } elseif ($trim === 'OPTIONS') {
+            $lines = &$curTest['options'];
+            continue;
+        } elseif ($trim === 'ANALYSIS') {
+            $curTest['analysis'] = array();
+            $lines = &$curTest['analysis'];
+            continue;
+        } elseif ($trim === 'ANALYSIS-TEXT') {
+            $curTest['analysis_text'] = array();
+            $lines = &$curTest['analysis_text'];
+            continue;
+        } elseif ($trim === 'ANALYSIS-JSON') {
+            $curTest['analysis_json'] = array();
+            $lines = &$curTest['analysis_json'];
             continue;
         }
         if ($lines !== null) {
@@ -45,11 +61,19 @@ while ($testfile = readdir($d)) {
     foreach ($tests as $i => $test) {
         $name = $testfile . '/' . ($i + 1);
         $code = "<?php\n" . trim(implode('', $test['input']));
-        $deobf = new \PHPDeobfuscator\Deobfuscator();
+        $options = array_filter(array_map('trim', $test['options']), 'strlen');
+        $maxInlineFile = null;
+        foreach ($options as $opt) {
+            if (strpos($opt, 'max-inline-file=') === 0) {
+                $maxInlineFile = (int) substr($opt, strlen('max-inline-file='));
+            }
+        }
+        $deobf = new \PHPDeobfuscator\Deobfuscator(false, false, false, in_array('execute-pure', $options, true), $maxInlineFile, in_array('remove-dead-code', $options, true), in_array('rename-vars', $options, true));
         $deobf->getFilesystem()->write($virtualPath, $code);
         $deobf->setCurrentFilename($virtualPath);
         try {
-            $out = $deobf->prettyPrint($deobf->deobfuscate($deobf->parse($code)));
+            $deobfTree = $deobf->deobfuscate($deobf->parse($code));
+            $out = $deobf->prettyPrint($deobfTree);
         } catch (\Exception | \Error $e) {
             echo "Test $name failed:\n";
             echo "Exception: " . $e->getMessage() . "\n";
@@ -57,18 +81,135 @@ while ($testfile = readdir($d)) {
             continue;
         }
         $expect = "<?php\n\n" . trim(implode('', $test['output']));
-        if ($out !== $expect) {
-            echo "Test $name failed:\n";
+        $deobfPass = ($out === $expect);
+        $analysisPass = true;
+        $analysisExpected = null;
+        $analysisGot = null;
+        if ($test['analysis'] !== null) {
+            $analysisExpected = trim(implode('', $test['analysis']));
+            $findings = $deobf->analyze($out, $deobfTree);
+            $formatter = new \PHPDeobfuscator\Analysis\ReportFormatter();
+            $analysisGot = trim($formatter->formatFixture($findings));
+            $analysisPass = ($analysisGot === $analysisExpected);
+        }
+        if (!$deobfPass) {
+            echo "Test $name failed (deobfuscation):\n";
             echo "Expected:\n";
             echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $expect)));
             echo "\n";
             echo "Got:\n";
             echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $out)));
             echo "\n";
-        } else {
+        }
+        if (!$analysisPass) {
+            echo "Test $name failed (analysis):\n";
+            echo "Expected:\n";
+            echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $analysisExpected)));
+            echo "\n";
+            echo "Got:\n";
+            echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $analysisGot)));
+            echo "\n";
+        }
+        $analysisTextPass = true;
+        $analysisTextExpected = null;
+        $analysisTextGot = null;
+        if (isset($test['analysis_text']) && $test['analysis_text'] !== null) {
+            $analysisTextExpected = trim(implode('', $test['analysis_text']));
+            $findings = $deobf->analyze($out, $deobfTree);
+            $formatter = new \PHPDeobfuscator\Analysis\ReportFormatter();
+            $analysisTextGot = trim($formatter->formatText($findings));
+            $analysisTextPass = ($analysisTextGot === $analysisTextExpected);
+        }
+        if (!$analysisTextPass) {
+            echo "Test $name failed (analysis-text):\n";
+            echo "Expected:\n";
+            echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $analysisTextExpected)));
+            echo "\n";
+            echo "Got:\n";
+            echo implode("\n", array_map(function($l) { return "[]: $l"; }, explode("\n", $analysisTextGot)));
+            echo "\n";
+        }
+        $analysisJsonPass = true;
+        $analysisJsonExpected = null;
+        $analysisJsonGot = null;
+        if (isset($test['analysis_json']) && $test['analysis_json'] !== null) {
+            $analysisJsonExpected = trim(implode('', $test['analysis_json']));
+            $findings = $deobf->analyze($out, $deobfTree);
+            $formatter = new \PHPDeobfuscator\Analysis\ReportFormatter();
+            $analysisJsonGot = trim($formatter->formatJson($findings));
+            $expectedDecoded = json_decode($analysisJsonExpected, true);
+            $gotDecoded = json_decode($analysisJsonGot, true);
+            $analysisJsonPass = ($expectedDecoded !== null && $expectedDecoded === $gotDecoded);
+        }
+        if (!$analysisJsonPass) {
+            echo "Test $name failed (analysis-json):\n";
+            echo "Expected:\n";
+            echo $analysisJsonExpected . "\n";
+            echo "Got:\n";
+            echo $analysisJsonGot . "\n";
+        }
+        if ($deobfPass && $analysisPass && $analysisTextPass && $analysisJsonPass) {
             echo "Test $name pass\n";
         }
     }
 }
 
 closedir($d);
+
+// --- EvalPeeler::normalizeLegacyStringOffsets unit cases -------------------
+// The eval-hook sandbox runs under PHP 8, which removed the `$s{i}` curly-brace
+// string-offset syntax that the FOPO / self-reading shell family is built from.
+// This transform rewrites it to `$s[i]` byte-for-byte (so __FILE__ self-decoders
+// that slice by offset still work). It needs no extension, so it is unit-tested
+// here regardless of whether php-eval-hook is installed.
+$normCases = array(
+    array('<?php echo $s{1};', '<?php echo $s[1];'),
+    array('<?php $x=$a{4}.$a{$i};', '<?php $x=$a[4].$a[$i];'),
+    array('<?php echo $arr[0]{2};', '<?php echo $arr[0][2];'),
+    array('<?php $a{0}{1}="x";', '<?php $a[0][1]="x";'),
+    array('<?php if($x){ echo 1; }', '<?php if($x){ echo 1; }'),            // block, untouched
+    array('<?php function f(){ return 1; }', '<?php function f(){ return 1; }'), // block
+    array('<?php $o=[1,2]; echo $o[0];', '<?php $o=[1,2]; echo $o[0];'),    // array literal
+    array('<?php echo "${v}";', '<?php echo "${v}";'),                       // interpolation
+    array('<?php echo "{$s}";', '<?php echo "{$s}";'),                       // interpolation
+    array('<?php $a{strlen($x)-1}=1;', '<?php $a[strlen($x)-1]=1;'),         // expr offset
+    array('<?php class C{ function m(){ $this->x=$s{0}; } }', '<?php class C{ function m(){ $this->x=$s[0]; } }'),
+);
+$peeler = new \PHPDeobfuscator\EvalHook\EvalPeeler();
+foreach ($normCases as $i => $case) {
+    $name = 'evalhook-normalize/' . ($i + 1);
+    $got = $peeler->normalizeLegacyStringOffsets($case[0]);
+    if ($got === $case[1] && strlen($got) === strlen($case[0])) {
+        echo "Test $name pass\n";
+    } else {
+        echo "Test $name failed:\n";
+        echo "Expected: {$case[1]}\n";
+        echo "Got:      {$got}\n";
+    }
+}
+
+// --- readabilityVerdict() unit cases (bin/lib/obfscore.php) ----------------
+// The triage readability gate: a deobfuscated output still "needs decoding" only
+// when it BOTH runs computed code AND carries an encoded payload feeding it. A
+// legitimate library with a data blob, or a plain request-fed backdoor, is
+// READABLE. Pure function, no extension needed.
+require_once __DIR__ . '/bin/lib/obfscore.php';
+$b64run = str_repeat('QUJDREVGR0g', 30); // a long base64-looking run (>200 chars)
+$readCases = array(
+    array('<?php function f($x){ return strlen($x); } echo f($_GET["a"]);', true),   // plain code
+    array('<?php eval($_POST["c"]);', true),                                          // request-fed, no payload
+    array('<?php $img="' . $b64run . '"; echo strlen($img);', true),                  // data blob, no computed-exec
+    array('<?php echo array_map("strtoupper", $rows); $s="' . $b64run . '"; echo $s;', true), // legit callback + blob
+    array('<?php eval(base64_decode("' . $b64run . '"));', false),                    // computed-exec + payload
+    array('<?php $f="ba"."se64_decode"; eval($f("' . $b64run . '"));', false),        // dynamic call + payload
+);
+foreach ($readCases as $i => $case) {
+    $name = 'readability-verdict/' . ($i + 1);
+    $v = readabilityVerdict($case[0]);
+    if ($v['readable'] === $case[1]) {
+        echo "Test $name pass\n";
+    } else {
+        echo "Test $name failed:\n";
+        echo 'Expected readable=' . ($case[1] ? 'true' : 'false') . ', got ' . ($v['readable'] ? 'true' : 'false') . " ({$v['reason']})\n";
+    }
+}

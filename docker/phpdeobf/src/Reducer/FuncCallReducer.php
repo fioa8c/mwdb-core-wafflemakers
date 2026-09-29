@@ -15,6 +15,42 @@ class FuncCallReducer extends AbstractReducer
     private $funcCallMap = array();
     private $resolver;
     private $evalReducer;
+    /**
+     * Memo of user-function inlining outcomes (scalar result, or null when the
+     * body could not be fully reduced), keyed by function name and the
+     * serialized scalar argument list. Inlining re-parses and fully re-reduces
+     * the body on every call site, which is prohibitively slow for obfuscators
+     * that route thousands of calls through a few decoder helpers. The cache is
+     * dropped whenever a new user function is registered, since that can turn
+     * a previous failure into a success.
+     */
+    private array $inlineCache = [];
+    private int $inlineCacheVersion = -1;
+    /**
+     * Upper bound on user-function inlinings per run. Junk-function droppers
+     * define dozens of cross-calling functions; every call site re-analyses the
+     * callee (and its callees), which without a cap runs for minutes.
+     */
+    const MAX_INLINE_ATTEMPTS = 4000;
+    private int $inlineAttempts = 0;
+
+    /** Optional real-execution fallback for provably pure user functions. */
+    private ?\PHPDeobfuscator\PureFunction\PurityAnalyzer $purityAnalyzer = null;
+    private ?\PHPDeobfuscator\PureFunction\PureFunctionExecutor $pureExecutor = null;
+    /** Functions the sandbox refused; never retried. */
+    private array $pureBlacklist = [];
+
+    /**
+     * Enables executing purity-verified user functions in a sandbox to resolve
+     * calls the symbolic reducer cannot. Off unless the caller opts in.
+     */
+    public function enablePureExecution(
+        \PHPDeobfuscator\PureFunction\PurityAnalyzer $analyzer,
+        \PHPDeobfuscator\PureFunction\PureFunctionExecutor $executor
+    ): void {
+        $this->purityAnalyzer = $analyzer;
+        $this->pureExecutor = $executor;
+    }
 
     public function __construct(Resolver $resolver, EvalReducer $evalReducer)
     {
@@ -50,6 +86,12 @@ class FuncCallReducer extends AbstractReducer
                     return;
                 }
             }
+            // The resolved value must be a usable function name. A variable can
+            // hold an arbitrary string (e.g. 'echo 1;'); rewriting that into a
+            // call name would emit invalid code, so leave the call untouched.
+            if (!$this->isValidFunctionName($name)) {
+                return;
+            }
             $nameNode = new Node\Name($name);
             // Special case for MetadataVisitor
             $nameNode->setAttribute('replaces', $node->name);
@@ -59,10 +101,21 @@ class FuncCallReducer extends AbstractReducer
         return $this->makeFunctionCall(strtolower($name), $node);
     }
 
+    /**
+     * Whether $name is a syntactically valid (optionally namespaced) PHP
+     * function name. Guards against rewriting a call when a variable callee
+     * resolved to a string that is not a real identifier.
+     */
+    private function isValidFunctionName($name): bool
+    {
+        return is_string($name)
+            && preg_match('/^\\\\?[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*(\\\\[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*)*$/', $name) === 1;
+    }
+
     private function makeFunctionCall($name, $node)
     {
         if(!isset($this->funcCallMap[$name])) {
-            return;
+            return $this->tryInlineUserFunction($name, $node);
         }
         $args = array();
         foreach ($node->args as $arg) {
@@ -212,6 +265,262 @@ class FuncCallReducer extends AbstractReducer
             return null;
         }
         return $name;
+    }
+
+    /**
+     * Fallback for calls to user-defined functions registered by
+     * UserFunctionPrepass. Mirrors resolveGlobalsLiteralClosureCall:
+     * builds a synthetic closure that binds the call's arguments to the
+     * function's parameter names, runs the body through EvalReducer::runEvalTree,
+     * and returns the scalar result if the body reduces fully.
+     */
+    private function tryInlineUserFunction(string $name, Node\Expr\FuncCall $node): ?Node
+    {
+        $func = $this->resolver->getUserFunction($name);
+        if ($func === null) {
+            return null;
+        }
+        foreach ($node->args as $arg) {
+            if ($arg->unpack || $arg->byRef) {
+                return null;
+            }
+        }
+
+        // Direct sandbox execution for calls the symbolic binder cannot model -
+        // array arguments (array_map("chr", $table) decoders) or variadic
+        // functions - but whose arguments are all fully known. The symbolic
+        // path below only handles scalar args bound one-to-one to params.
+        $directValues = $this->fullyKnownArgValues($node);
+        if ($directValues !== null) {
+            $paramsSimple = count($func->params) === count($node->args);
+            foreach ($func->params as $param) {
+                if ($param->byRef || $param->variadic) {
+                    $paramsSimple = false;
+                }
+            }
+            $anyArrayArg = false;
+            foreach ($directValues as $v) {
+                if (is_array($v)) {
+                    $anyArrayArg = true;
+                }
+            }
+            if (!$paramsSimple || $anyArrayArg) {
+                if (++$this->inlineAttempts > self::MAX_INLINE_ATTEMPTS) {
+                    return null;
+                }
+                $value = $this->tryExecutePure($name, $directValues);
+                return $value === null ? null : Utils::scalarToNode($value);
+            }
+        }
+
+        if (count($func->params) !== count($node->args)) {
+            return null; // symbolic binding needs one arg per param
+        }
+        foreach ($func->params as $param) {
+            if ($param->byRef || $param->variadic) {
+                return null;
+            }
+        }
+        if (++$this->inlineAttempts > self::MAX_INLINE_ATTEMPTS) {
+            return null;
+        }
+
+        try {
+            $bindings = [];
+            $argValues = [];
+            $cacheable = true;
+            foreach ($func->params as $i => $param) {
+                $paramName = $param->var->name;
+                if (!is_string($paramName)) {
+                    return null;
+                }
+                try {
+                    $argVal = Utils::getValue($node->args[$i]->value);
+                    if (is_array($argVal) || is_object($argVal) || is_resource($argVal)) {
+                        return null;
+                    }
+                    $argNode = Utils::scalarToNode($argVal);
+                    $argValues[] = $argVal;
+                } catch (\PHPDeobfuscator\Exceptions\BadValueException $e) {
+                    $argNode = Utils::cloneAst($node->args[$i]->value);
+                    $cacheable = false;
+                }
+                $bindings[] = new Node\Stmt\Expression(
+                    new Node\Expr\Assign(new Node\Expr\Variable($paramName), $argNode));
+            }
+            // Unknown arguments: the result is only worth caching when it was a
+            // failure - a function that could not be reduced with opaque inputs
+            // will not reduce at the next call site with opaque inputs either.
+            $cacheKey = $cacheable ? strtolower($name) . ':' . serialize($argValues) : strtolower($name) . ':?';
+            if ($cacheKey !== null) {
+                $version = $this->resolver->getUserFunctionVersion();
+                if ($version !== $this->inlineCacheVersion) {
+                    $this->inlineCache = [];
+                    $this->inlineCacheVersion = $version;
+                }
+                if (array_key_exists($cacheKey, $this->inlineCache)) {
+                    $cached = $this->inlineCache[$cacheKey];
+                    return $cached === null ? null : Utils::scalarToNode($cached);
+                }
+            }
+            // Build the synthetic closure in memory: printing the body and
+            // parsing it back cost more than the reduction itself on samples
+            // that call a decoder thousands of times.
+            $closure = new Node\Expr\Closure([
+                'stmts' => array_merge($bindings, Utils::cloneAst($func->stmts)),
+            ]);
+            $stmts = $this->evalReducer->runEvalStmts([new Node\Stmt\Expression($closure)]);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        $value = $this->extractInlinedReturn($stmts);
+        if ($value === null && $cacheable) {
+            $value = $this->tryExecutePure($name, $argValues);
+        }
+        // Only record if no function was registered while reducing the body;
+        // otherwise a later attempt might legitimately do better.
+        if ($cacheKey !== null && $this->resolver->getUserFunctionVersion() === $this->inlineCacheVersion
+            && ($cacheable || $value === null)) {
+            $this->inlineCache[$cacheKey] = $value;
+        }
+        return $value === null ? null : Utils::scalarToNode($value);
+    }
+
+    /**
+     * Last-resort resolution for calls the symbolic reducer could not reduce:
+     * if the function and its whole call graph pass the purity analysis, run it
+     * for real in the sandbox and use the value it produces.
+     *
+     * Returns null on any doubt - unverified function, sandbox error,
+     * non-scalar or null result.
+     *
+     * @param scalar[] $argValues
+     * @return scalar|null
+     */
+    /**
+     * Argument values for a call when every argument is a fully-known scalar or
+     * a (bounded) array of scalars; null if any argument is unknown or holds an
+     * object/resource. Used to feed the sandbox for array/variadic calls.
+     *
+     * @return array<int, scalar|array|null>|null
+     */
+    private function fullyKnownArgValues(Node\Expr\FuncCall $node): ?array
+    {
+        $vals = [];
+        foreach ($node->args as $arg) {
+            if ($arg->unpack || $arg->byRef) {
+                return null;
+            }
+            try {
+                $v = Utils::getValue($arg->value);
+            } catch (\PHPDeobfuscator\Exceptions\BadValueException $e) {
+                return null;
+            }
+            if (!$this->isScalarOrScalarArray($v)) {
+                return null;
+            }
+            $vals[] = $v;
+        }
+        return $vals;
+    }
+
+    private function isScalarOrScalarArray($v, int $depth = 0): bool
+    {
+        if ($v === null || is_scalar($v)) {
+            return true;
+        }
+        if (is_array($v) && $depth < 8) {
+            foreach ($v as $x) {
+                if (!$this->isScalarOrScalarArray($x, $depth + 1)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private function tryExecutePure(string $name, array $argValues)
+    {
+        if ($this->purityAnalyzer === null || $this->pureExecutor === null) {
+            return null;
+        }
+        $key = strtolower($name);
+        if (isset($this->pureBlacklist[$key])) {
+            return null;
+        }
+        if (!$this->purityAnalyzer->isPure($key)) {
+            $this->pureBlacklist[$key] = true;
+            return null;
+        }
+        $printer = new \PHPDeobfuscator\ExtendedPrettyPrinter();
+        $defs = [];
+        try {
+            foreach ($this->purityAnalyzer->getDependencies() as $dep) {
+                $func = $this->resolver->getUserFunction($dep);
+                if ($func === null) {
+                    $this->pureBlacklist[$key] = true;
+                    return null;
+                }
+                $defs[strtolower($dep)] = $printer->prettyPrint([$func]);
+            }
+        } catch (\Throwable $e) {
+            $this->pureBlacklist[$key] = true;
+            return null;
+        }
+        if (!$defs) {
+            $this->pureBlacklist[$key] = true;
+            return null;
+        }
+        $result = $this->pureExecutor->call($defs, $key, $argValues);
+        if (empty($result['ok'])) {
+            // Only stop retrying when the refusal is a property of the function
+            // itself (non-deterministic, produced output, failed to define).
+            // A per-call refusal may not apply to other arguments, and a
+            // transient sandbox failure says nothing about the function -
+            // blacklisting on either would cascade to every dependent decoder.
+            if (($result['kind'] ?? 'function') === 'function') {
+                $this->pureBlacklist[$key] = true;
+            }
+            return null;
+        }
+        $value = $result['value'] ?? null;
+        if ($value === null || !is_scalar($value)) {
+            return null;
+        }
+        return $value;
+    }
+
+    /**
+     * Returns the scalar an inlined closure body returns, or null when the body
+     * did not reduce to a closure ending in a single provable scalar `return`.
+     */
+    private function extractInlinedReturn(array $stmts)
+    {
+        if (count($stmts) !== 1 || !($stmts[0] instanceof Node\Stmt\Expression)) {
+            return null;
+        }
+        $reducedClosure = $stmts[0]->expr;
+        if (!($reducedClosure instanceof Node\Expr\Closure)) {
+            return null;
+        }
+        $bodyStmts = $reducedClosure->stmts;
+        if (empty($bodyStmts)) {
+            return null;
+        }
+        $last = end($bodyStmts);
+        if (!($last instanceof Node\Stmt\Return_) || $last->expr === null) {
+            return null;
+        }
+        try {
+            $value = Utils::getValue($last->expr);
+        } catch (\PHPDeobfuscator\Exceptions\BadValueException $e) {
+            return null;
+        }
+        if (is_array($value) || is_object($value) || is_resource($value)) {
+            return null;
+        }
+        return $value;
     }
 
 }

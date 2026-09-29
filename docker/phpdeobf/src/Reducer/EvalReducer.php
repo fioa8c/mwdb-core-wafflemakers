@@ -44,7 +44,11 @@ class EvalReducer extends AbstractReducer
         if (!Utils::safeFileExists($fileSystem, $file)) {
             return;
         }
-        $code = $fileSystem->read($file);
+        try {
+            $code = $fileSystem->read($file);
+        } catch (\League\Flysystem\FilesystemException $e) {
+            return;
+        }
         return $this->tryRunEval($code);
     }
 
@@ -52,10 +56,13 @@ class EvalReducer extends AbstractReducer
     {
         try {
             return $this->runEval($code);
-        } catch (\Exception $e) {
-            print "Error traversing". PHP_EOL;
-            echo $e->getMessage() . PHP_EOL;
-            echo $e->getTraceAsString() . PHP_EOL;
+        } catch (\Throwable $e) {
+            // The decoded eval() body is not reducible (e.g. it is not parseable
+            // PHP, or a nested pass threw). Degrade per the robustness invariant:
+            // leave the eval() call intact and never abort the whole file. A
+            // stack trace here used to be dumped to STDOUT, corrupting the
+            // deobfuscated output; keep a one-line breadcrumb on STDERR instead.
+            fwrite(STDERR, 'note: eval() layer left intact (' . $e->getMessage() . ")\n");
             return null;
         }
     }
@@ -93,18 +100,36 @@ class EvalReducer extends AbstractReducer
 
     private function parseCode($code)
     {
-        /* Convert ?> into <? */
-        if (substr($code, 0, 2) == '?>' && $code[2] != '<') {
-            $code[0] = '<';
-            $code[1] = '?';
-        }
-        $prefix = substr($code, 0, 2) == '<?' ? '' : '<?php ';
+        // eval()'d code runs starting in PHP mode. If it already carries an open
+        // tag we parse it as-is; otherwise we prepend an open tag. A body that
+        // begins with a close tag (immediately dropping to inline HTML, e.g. a
+        // DOCTYPE-emitting shell) is valid PHP once the open tag is prepended, so
+        // it must NOT be rewritten into an open tag itself — doing so turned the
+        // close tag into a second open tag and produced unparseable input.
+        $prefix = substr($code, 0, 2) === '<?' ? '' : '<?php ';
         return $this->deobfuscator->parse("{$prefix}{$code}");
     }
 
     private function deobfTree($tree)
     {
         return $this->deobfuscator->deobfuscate($tree);
+    }
+
+    /**
+     * Like runEvalTree() but for statements that were built in memory (e.g. a
+     * cloned function body) - skips the print/parse round trip.
+     */
+    public function runEvalStmts(array $stmts)
+    {
+        if ($this->depth >= self::MAX_DEPTH) {
+            return [];
+        }
+        $this->depth++;
+        try {
+            return $this->deobfTree($stmts);
+        } finally {
+            $this->depth--;
+        }
     }
 
     public function runEvalTree($code)

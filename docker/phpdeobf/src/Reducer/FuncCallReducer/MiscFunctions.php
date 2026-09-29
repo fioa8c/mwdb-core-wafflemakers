@@ -27,7 +27,28 @@ class MiscFunctions implements FunctionReducer
             'preg_replace',
             'reset',
             'create_function',
+            'array_map',
+            'constant'
         );
+    }
+
+    /**
+     * Rewrites `constant("FOO")` into a plain `FOO` constant fetch. The two are
+     * equivalent (both raise on an undefined constant), but obfuscators use the
+     * call form to keep constant names out of the source as identifiers.
+     *
+     * The name must be a syntactically valid constant identifier, so a string
+     * that merely resolves cannot produce invalid output. The constant's value
+     * is deliberately not substituted - it is defined by the host application
+     * (WordPress, php.ini), not by this file.
+     */
+    private function constantFetch($name)
+    {
+        if (!is_string($name)
+            || !preg_match('/^\\\\?[A-Za-z_\\x80-\\xff][A-Za-z0-9_\\x80-\\xff]*(\\\\[A-Za-z_\\x80-\\xff][A-Za-z0-9_\\x80-\\xff]*)*$/', $name)) {
+            return null;
+        }
+        return new Node\Expr\ConstFetch(new Node\Name($name));
     }
 
     public function execute($name, array $args, FuncCall $node)
@@ -42,6 +63,10 @@ class MiscFunctions implements FunctionReducer
             return Utils::scalarToNode(reset($arg));
         case 'create_function':
             return $this->createFunction($args[0], $args[1]);
+        case 'array_map':
+                return $this->staticArrayMap($args[0], $args[1]);
+        case 'constant':
+            return $this->constantFetch($args[0]);
         }
     }
 
@@ -152,6 +177,34 @@ class MiscFunctions implements FunctionReducer
         } catch (\Exception $e) {
             return null;
         }
+    }
+    private function staticArrayMap($callback, $items)
+    {
+        if (!is_string($callback) || !is_array($items)) {
+            return null;
+        }
+        // Reject things like 'system' or 'eval' early — we are NOT executing arbitrary PHP.
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $callback)) {
+            return null;
+        }
+
+        $out = array();
+        foreach ($items as $key => $val) {
+            if (!is_scalar($val) && !is_null($val)) {
+                return null;        // give up; can't symbolically pass non-scalars yet
+            }
+            $valSrc = var_export($val, true);
+            try {
+                // Reuse the eval pipeline: parse a tiny PHP snippet that calls the callback,
+                // run it through the full deobf pass, and read the reduced return value.
+                $stmts  = $this->evalReducer->runEvalTree("return {$callback}({$valSrc});");
+                $expr   = $stmts[0]->expr;
+                $out[$key] = Utils::getValue($expr);
+            } catch (\Throwable $e) {
+                return null;        // anything weird? bail safely
+            }
+        }
+        return Utils::scalarToNode($out);
     }
 
 }

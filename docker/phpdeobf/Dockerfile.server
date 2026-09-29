@@ -1,14 +1,36 @@
-FROM php:8.5-cli-bookworm
+# syntax=docker/dockerfile:1
+# phpdeobf sidecar: the PHPDeobfuscator engine behind server.php, with the
+# php-eval-hook extension built from the vendored sources in ./evalhook.
+FROM php:8.5-cli-bookworm AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends $PHPIZE_DEPS unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+# Build the eval-hook extension against this image's PHP.
+COPY evalhook /build/evalhook
+WORKDIR /build/evalhook
+RUN phpize && ./configure --enable-evalhook && make -j"$(nproc)" \
+    && mkdir -p /out/evalhook && cp modules/evalhook.so /out/evalhook/evalhook.so
+
+# Composer pinned: unpinned installs drifted to 2.10, which no longer falls back
+# to git checkouts when unzip is missing.
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --version=2.10.3
 
 COPY . /app
 WORKDIR /app
+RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-RUN composer install --no-dev --optimize-autoloader
+FROM php:8.5-cli-bookworm
 
+COPY --from=builder /out/evalhook/evalhook.so /usr/local/lib/php/evalhook/evalhook.so
+COPY --from=builder --chown=nobody:nogroup /app /app
+ENV PHPDEOBF_EVALHOOK=/usr/local/lib/php/evalhook/evalhook.so
+# Two built-in-server workers so one long deobfuscation cannot block /health.
+ENV PHP_CLI_SERVER_WORKERS=2
+WORKDIR /app
+USER nobody
 EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
+    CMD php -r 'exit(@file_get_contents("http://127.0.0.1:8080/health") === false ? 1 : 0);'
 CMD ["php", "-S", "0.0.0.0:8080", "server.php"]

@@ -339,6 +339,22 @@ docker compose -f docker-compose-prod.yml exec postgres \
    (ingest runs first); after a quiet period mark those dirs as generated in
    the repo README.
 
+### PHP deobfuscator sidecar rollout
+
+1. `docker compose -f docker-compose-prod.yml up -d` (the whole file, not a
+   single service) so `mwdb` is recreated and joins the internal
+   `phpdeobf-net` network, and picks up `GUNICORN_CMD_ARGS=--timeout 120`.
+2. Rebuild the sidecar:
+   `docker compose -f docker-compose-prod.yml up -d --build phpdeobf`
+   (rebuild `mwdb-web` too if its image predates the
+   `proxy_read_timeout 120s` line in `docker/nginx.conf.template`).
+3. Check it: `curl -s -H "Authorization: Bearer $TOKEN" https://$MWDB_DOMAIN/api/phpdeobf/health`
+   should return `{"status": "ok", "evalhook_available": true, ...}`.
+4. Nothing to do for permissions: at startup the plugin creates the
+   `phpdeobf_sink` attribute definition and grants the `registered` group
+   read access to it, so every researcher can see and search the sink
+   categories.
+
 ## Security notes
 
 - **Firewall:** Only ports 80 and 443 should be open. PostgreSQL (5432), Redis (6379), and gunicorn (8080) are internal-only (no `ports:` exposed to host in the compose file).

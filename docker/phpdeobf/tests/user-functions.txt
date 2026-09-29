@@ -1,0 +1,27 @@
+INPUT
+
+function addone($n) { return $n + 1; }
+$x = addone(5);
+
+OUTPUT
+
+function addone($n)
+{
+    return $n + 1;
+}
+$x = 6;
+
+INPUT
+
+$GLOBALS['sep'] = '-';
+function glue($a, $b) { return $a . $GLOBALS['sep'] . $b; }
+$r = glue('foo', 'bar');
+
+OUTPUT
+
+$GLOBALS['sep'] = '-';
+function glue($a, $b)
+{
+    return $a . $GLOBALS['sep'] . $b;
+}
+$r = "foo-bar";

@@ -51,7 +51,10 @@ function start_server($port) {
 
 function stop_server($pid) {
     if ($pid) {
-        posix_kill($pid, SIGTERM);
+        // SIGTERM is defined by the pcntl extension, which the phpdeobf sidecar
+        // image doesn't build with; fall back to the POSIX signal number (15)
+        // so this doesn't fatal with "Undefined constant" in that environment.
+        posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
     }
 }
 
@@ -62,8 +65,17 @@ function post_json($port, $path, $body) {
         CURLOPT_POST => true,
         CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
         CURLOPT_POSTFIELDS => json_encode($body),
-        CURLOPT_TIMEOUT => 10,
+        CURLOPT_TIMEOUT => 60,
     ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return [$code, json_decode($resp, true)];
+}
+
+function get_json($port, $path) {
+    $ch = curl_init("http://127.0.0.1:$port$path");
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
     $resp = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
@@ -83,6 +95,15 @@ function post_raw($port, $path, $rawBody) {
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     return [$code, json_decode($resp, true)];
+}
+
+function sinks_by_origin($analysis) {
+    $counts = ['static' => 0, 'peeled' => 0];
+    foreach ($analysis['sinks'] as $sink) {
+        $origin = $sink['origin'] ?? '?';
+        $counts[$origin] = ($counts[$origin] ?? 0) + 1;
+    }
+    return $counts;
 }
 
 function assert_eq($actual, $expected, $label) {
@@ -143,6 +164,134 @@ try {
     [$code, $body] = post_json($port, '/wrong/path', ['source' => '<?php echo 1;']);
     assert_eq($code, 404, 'not found: 404');
     assert_eq($body['code'], 'not_found', 'not found: code=not_found');
+
+    // --- health ---
+    [$code, $body] = get_json($port, '/health');
+    assert_eq($code, 200, 'health: 200');
+    assert_eq($body['status'], 'ok', 'health: status=ok');
+    if (!is_bool($body['evalhook_available'] ?? null) || !is_string($body['phpdeobf'] ?? null)) {
+        throw new \RuntimeException('FAIL: health: evalhook_available/phpdeobf missing');
+    }
+    $evalhook = $body['evalhook_available'];
+    echo "ok: health shape (evalhook_available=" . var_export($evalhook, true) . ")\n";
+
+    // --- options echo + null fields when nothing requested ---
+    [$code, $body] = post_json($port, '/deobfuscate', ['source' => "<?php echo 1 + 2;"]);
+    assert_eq($body['options'], [
+        'strip_comments' => false, 'execute_pure' => false, 'eval_peel' => false,
+        'remove_dead_code' => false, 'rename_vars' => false, 'analyze' => false,
+    ], 'defaults: all options false');
+    assert_eq($body['peeled'], null, 'defaults: peeled null');
+    assert_eq($body['analysis'], null, 'defaults: analysis null');
+    assert_eq($body['warnings'], [], 'defaults: no warnings');
+    if (!is_string($body['engine']['phpdeobf'] ?? null)) {
+        throw new \RuntimeException('FAIL: engine.phpdeobf missing');
+    }
+
+    // --- analysis on a sample with a sink ---
+    [$code, $body] = post_json($port, '/deobfuscate', [
+        'source' => "<?php \$c = \$_GET['c']; system(\$c);",
+        'options' => ['analyze' => true, 'strip_comments' => true],
+    ]);
+    assert_eq($code, 200, 'analysis: 200');
+    assert_eq($body['status'], 'ok', 'analysis: status=ok');
+    assert_eq($body['analysis']['version'], 1, 'analysis: version 1');
+    assert_eq($body['analysis']['analyzed'], 'static', 'analysis: analyzed=static');
+    if (!in_array('os_exec', $body['analysis']['summary']['categories_present'], true)) {
+        throw new \RuntimeException('FAIL: analysis: os_exec category expected, got ' . json_encode($body['analysis']['summary']));
+    }
+    echo "ok: analysis: os_exec sink found\n";
+
+    // --- bad option value ---
+    [$code, $body] = post_json($port, '/deobfuscate', ['source' => '<?php echo 1;', 'options' => ['analyze' => 'yes']]);
+    assert_eq($code, 400, 'bad option: 400');
+    assert_eq($body['code'], 'bad_request', 'bad option: code=bad_request');
+
+    // --- eval peel ---
+    $selfDecoding = "<?php eval(base64_decode('ZWNobyAxOw=='));";
+    [$code, $body] = post_json($port, '/deobfuscate', [
+        'source' => $selfDecoding, 'options' => ['eval_peel' => true, 'analyze' => true],
+    ]);
+    assert_eq($code, 200, 'peel: 200');
+    if ($evalhook) {
+        if (!is_array($body['peeled']) || ($body['peeled']['layers'] ?? 0) < 1) {
+            throw new \RuntimeException('FAIL: peel: expected >=1 layer, got ' . json_encode($body['peeled']) . ' warnings=' . json_encode($body['warnings']));
+        }
+        if (strpos($body['peeled']['output'], 'echo 1') === false) {
+            throw new \RuntimeException('FAIL: peel: layer content missing');
+        }
+        assert_eq($body['analysis']['analyzed'], 'static+peeled', 'peel: analysis ran on static+peeled output');
+        assert_eq(strpos($body['peeled']['output'], 'captured in'), false, 'peel: timing stripped from peeled header');
+        if (!is_float($body['peeled']['secs']) && !is_int($body['peeled']['secs'])) {
+            throw new \RuntimeException('FAIL: peel: secs missing from peeled object');
+        }
+        echo "ok: peel: {$body['peeled']['layers']} layer(s) captured\n";
+
+        // Two runs of the same sample produce byte-identical peeled output.
+        [, $again] = post_json($port, '/deobfuscate', [
+            'source' => $selfDecoding, 'options' => ['eval_peel' => true, 'analyze' => true],
+        ]);
+        assert_eq($again['peeled']['output'], $body['peeled']['output'], 'peel: output deterministic across runs');
+
+        // --- eval peel on a sample with no eval() ---
+        [$code, $body] = post_json($port, '/deobfuscate', [
+            'source' => '<?php echo 1;', 'options' => ['eval_peel' => true],
+        ]);
+        assert_eq($code, 200, 'peel no layers: 200');
+        assert_eq($body['status'], 'ok', 'peel no layers: status=ok');
+        assert_eq($body['peeled'], null, 'peel no layers: peeled null');
+        assert_eq($body['warnings'][0]['code'] ?? null, 'eval_peel_no_layers', 'peel no layers: warning code');
+        assert_eq($body['options']['eval_peel'], true, 'peel no layers: options.eval_peel still true');
+    } else {
+        assert_eq($body['peeled'], null, 'peel (no extension): peeled null');
+        assert_eq($body['warnings'][0]['code'], 'eval_peel_unavailable', 'peel (no extension): warning');
+        echo "SKIP: eval-hook extension not available here; peel assertions ran in fallback mode only\n";
+    }
+
+    // --- merged analysis: sink outside eval() must still be reported ---
+    $mixedSource = "<?php \$c = \$_GET['c']; eval(base64_decode('ZWNobyAxOw==')); system(\$c);";
+    [$code, $body] = post_json($port, '/deobfuscate', [
+        'source' => $mixedSource, 'options' => ['eval_peel' => true, 'analyze' => true],
+    ]);
+    assert_eq($code, 200, 'merged analysis: 200');
+    if (!in_array('os_exec', $body['analysis']['summary']['categories_present'], true)) {
+        throw new \RuntimeException('FAIL: merged analysis: os_exec category expected, got ' . json_encode($body['analysis']['summary']));
+    }
+    $staticSinkFound = false;
+    foreach ($body['analysis']['sinks'] as $sink) {
+        if (($sink['origin'] ?? null) === 'static') {
+            $staticSinkFound = true;
+            break;
+        }
+    }
+    if (!$staticSinkFound) {
+        throw new \RuntimeException('FAIL: merged analysis: expected a sink with origin=static, got ' . json_encode($body['analysis']['sinks']));
+    }
+    echo "ok: merged analysis: os_exec sink outside eval() reported with origin=static\n";
+    $counts = sinks_by_origin($body['analysis']);
+    assert_eq($counts['peeled'], 0, 'merged analysis: no peeled-origin sink when the eval layer has none');
+    assert_eq($body['analysis']['summary']['sink_count'], $counts['static'] + $counts['peeled'], 'merged analysis: sink_count = static + peeled');
+    if ($evalhook) {
+        if (!is_array($body['peeled']) || ($body['peeled']['layers'] ?? 0) < 1) {
+            throw new \RuntimeException('FAIL: merged analysis: expected >=1 peeled layer, got ' . json_encode($body['peeled']));
+        }
+        echo "ok: merged analysis: {$body['peeled']['layers']} peeled layer(s) alongside static sink\n";
+
+        // --- merged analysis where the eval layer itself holds a sink ---
+        // Layer: system($_GET['x']);  plus a static system($c) outside eval().
+        $sinkLayerSource = "<?php \$c = \$_GET['c']; eval(base64_decode('c3lzdGVtKCRfR0VUWyd4J10pOw==')); system(\$c);";
+        [$code, $body] = post_json($port, '/deobfuscate', [
+            'source' => $sinkLayerSource, 'options' => ['eval_peel' => true, 'analyze' => true],
+        ]);
+        assert_eq($code, 200, 'merged sink layer: 200');
+        assert_eq($body['analysis']['analyzed'], 'static+peeled', 'merged sink layer: analyzed=static+peeled');
+        $counts = sinks_by_origin($body['analysis']);
+        if ($counts['static'] < 1 || $counts['peeled'] < 1) {
+            throw new \RuntimeException('FAIL: merged sink layer: expected static and peeled sinks, got ' . json_encode($counts));
+        }
+        assert_eq($body['analysis']['summary']['sink_count'], $counts['static'] + $counts['peeled'], 'merged sink layer: sink_count = static + peeled');
+        echo "ok: merged sink layer: static={$counts['static']} peeled={$counts['peeled']}\n";
+    }
 
     echo "\nALL PASSED\n";
 } catch (\Throwable $e) {
