@@ -125,7 +125,7 @@ Because they are pip-installed into site-packages (not autodiscovered from `/app
 
 - `yarax_regex` — YARA-X live regex playground tab; `POST /api/yarax/regex`.
 - `phpdeobf` — "PHP Deobfuscate" tab; `POST /api/phpdeobf/<hash>` calls the `phpdeobf` sidecar (`MWDB_PHPDEOBF_URL`, default `http://phpdeobf:8080`) and creates a `TextBlob` child with `blob_type="deobfuscated-php"`. See `docker/plugins/phpdeobf/README.md`.
-- `malleus` — no UI; creates the Malleus attribute definitions, grants the reporter/scanner groups (`MWDB_MALLEUS_SET_GROUPS` / `MWDB_MALLEUS_READ_GROUPS`) their permissions, and hooks that strip disallowed `context` keys and foreign `source:` tags. See `docker/plugins/malleus/README.md`.
+- `malleus` — no UI; creates the Malleus attribute definitions, grants the reporter/scanner groups (`MWDB_MALLEUS_SET_GROUPS` / `MWDB_MALLEUS_READ_GROUPS`) their permissions, an upload guard that rejects (HTTP 400) uploads whose `context` has disallowed keys, and post-commit hooks that strip such keys when added later plus foreign or reporter-replayed `source:` tags. See `docker/plugins/malleus/README.md`.
 
 The sidecar's PHP source in `docker/phpdeobf/` is **vendored** from `~/WORK/PHPDeobfuscator/` — don't edit it in place; refresh with `bash docker/phpdeobf/sync-from-source.sh` and commit.
 

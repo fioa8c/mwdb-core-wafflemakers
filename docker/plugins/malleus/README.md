@@ -29,7 +29,8 @@ with 400 (`context attribute has disallowed keys: ...`). It has to be rejected:
 MWDB spawns the Karton task, with the upload's attributes, inside the request
 and before any post-commit hook runs.
 
-Post-commit hooks:
+Post-commit hooks (they cannot help the Karton task, whose payload is built at upload; feeders must send `context`
+and the `source:` tag in the upload options, because anything added later reaches the consumer only after a reanalysis):
 
 - `context` added after upload may only hold the keys above. Other keys are
   stripped and the object is tagged `wm:context-stripped`. A `context` that is
