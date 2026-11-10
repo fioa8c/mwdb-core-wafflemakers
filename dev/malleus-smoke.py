@@ -63,16 +63,17 @@ def connect():
     return mwdb
 
 
-def wait_for_verdict(mwdb, sha256, timeout, old_analyses=()):
-    """Wait for a malleus_verdict. With old_analyses (a reanalysis), also wait until the run's own
-    malleus_analysis value is there: the verdict of the previous run is not the one we want."""
+def wait_for_verdict(mwdb, sha256, timeout, old_analyses=None):
+    """Wait for a malleus_verdict. With old_analyses (a reanalysis; must not be empty), also wait until
+    a malleus_analysis value that is not in it is there: the previous run's verdict is not the one we want."""
+    assert old_analyses is None or old_analyses, "a reanalysis needs the first run's malleus_analysis"
     deadline = time.time() + timeout
     while True:
         obj = mwdb.query_file(sha256)
         obj.flush()
         attrs = obj.attributes
         fresh = [a for a in attrs.get("malleus_analysis", []) if a not in old_analyses]
-        if attrs.get("malleus_verdict") and (fresh or not old_analyses):
+        if attrs.get("malleus_verdict") and (old_analyses is None or fresh):
             return obj, attrs
         if time.time() >= deadline:
             return obj, None
@@ -115,9 +116,10 @@ def wait_for_sandbox(mwdb, sha256, timeout):
         attrs = obj.attributes
         summaries = [c for c in obj.children
                      if c.type == "sandbox-report" and c.name.endswith("-kadath-summary.json")]
-        if (summaries and attrs.get("sandbox_level")) or time.time() >= deadline:
+        ready = summaries and attrs.get("sandbox_level") and stage_status(attrs, "sandbox")
+        if ready or time.time() >= deadline:
             break
-        print("waiting for sandbox-report child and sandbox_level ...", flush=True)
+        print("waiting for sandbox-report child, sandbox_level and sandbox stage ...", flush=True)
         time.sleep(10)
     failures = []
     if not summaries:
@@ -156,8 +158,22 @@ def reanalysis_failures(obj):
 
 def reanalyze(mwdb, obj, first_attrs, args):
     """Reanalyse `obj`, wait for the new run and return a list of failed checks."""
+    # The verdict can be visible before malleus_analysis (separate reporter posts): without the first
+    # run's value there is nothing to tell the new run from the old one.
+    deadline = time.time() + args.timeout
     old = list(first_attrs.get("malleus_analysis", []))
-    analysis = obj.reanalyze()
+    while not old:
+        if time.time() >= deadline:
+            return ["no malleus_analysis on the first run after %ss, cannot tell a reanalysis from it" % args.timeout]
+        print("waiting for malleus_analysis of the first run ...", flush=True)
+        time.sleep(10)
+        fresh_obj = mwdb.query_file(obj.sha256)
+        fresh_obj.flush()
+        old = list(fresh_obj.attributes.get("malleus_analysis", []))
+    try:
+        analysis = obj.reanalyze()
+    except Exception as e:
+        return ["reanalyze: %s" % e]
     print("reanalysis requested: karton analysis %s" % analysis.id)
     obj, attrs = wait_for_verdict(mwdb, obj.sha256, args.timeout, old_analyses=old)
     if attrs is None:
