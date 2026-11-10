@@ -1,11 +1,25 @@
 # Publish Redis on localhost so malleus-static running on the laptop can reach the dev stack
 # Needed only for running a local `malleus-static`; silo (S3) is already published by compose.silo.yml.
-# The web UI is then at http://127.0.0.1:8081 and the smoke script needs MWDB_URL=http://127.0.0.1:8081/api.
+# Also moves host ports that clash on this laptop (8081 = Kadath gateway, 8025-8026 = ddev mailhog) and gives the
+# Karton reporter the generated admin credentials.
+# The web UI is then at http://127.0.0.1:8082 and the smoke script needs MWDB_URL=http://127.0.0.1:8082/api.
 services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
   mwdb-web:
-    # The dev overlay publishes the SPA on port 80, which is often taken on a laptop; use 8081 instead.
+    # The dev overlay publishes the SPA on port 80, which is often taken on a laptop; use 8082 instead.
     ports: !override
-      - "127.0.0.1:8081:3000"
+      - "127.0.0.1:8082:3000"
+  mailhog:
+    ports: !override
+      - "127.0.0.1:8027:8025"
+  karton-mwdb-reporter:
+    # dev/karton.ini (upstream) hard-codes [mwdb] username = admin / password = admin, but gen_vars.sh generates a
+    # random admin password into mwdb-vars.env (passed in by compose.with-karton.yml as MWDB_ADMIN_LOGIN /
+    # MWDB_ADMIN_PASSWORD). karton-core lets KARTON_MWDB_USERNAME / KARTON_MWDB_PASSWORD override karton.ini, so derive
+    # them at start. Same shell entrypoint as the image (/bin/sh -c karton-mwdb-reporter). Prod uses KARTON_MWDB_API_KEY.
+    entrypoint:
+      - sh
+      - -c
+      - 'export KARTON_MWDB_USERNAME="$$MWDB_ADMIN_LOGIN" KARTON_MWDB_PASSWORD="$$MWDB_ADMIN_PASSWORD"; exec karton-mwdb-reporter'

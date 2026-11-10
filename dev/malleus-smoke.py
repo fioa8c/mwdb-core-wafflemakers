@@ -4,7 +4,7 @@
 Uploads tests/fixtures/malleus/weak.php tagged source:researcher, then waits for
 malleus-static (via Karton and karton-mwdb-reporter) to set the malleus_verdict attribute.
 
-Env: MWDB_URL (default http://127.0.0.1:8081/api, where compose.with-malleus-dev.yml serves the SPA/API), MWDB_API_KEY or MWDB_ADMIN_LOGIN/MWDB_ADMIN_PASSWORD.
+Env: MWDB_URL (default http://127.0.0.1:8082/api, where compose.with-malleus-dev.yml serves the SPA/API), MWDB_API_KEY or MWDB_ADMIN_LOGIN/MWDB_ADMIN_PASSWORD.
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ CONTEXT = {"scanner": "smoke", "site_id": 123}
 
 
 def connect():
-    mwdb = MWDB(api_url=os.environ.get("MWDB_URL", "http://127.0.0.1:8081/api"))
+    mwdb = MWDB(api_url=os.environ.get("MWDB_URL", "http://127.0.0.1:8082/api"))
     if os.environ.get("MWDB_API_KEY"):
         mwdb.api.set_api_key(os.environ["MWDB_API_KEY"])
     else:
@@ -55,10 +55,14 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="seconds to wait for the verdict")
     ap.add_argument("--context-test", action="store_true",
                     help="also upload a variant carrying a context attribute with a disallowed key")
+    ap.add_argument("--salt", default="",
+                    help="append a PHP comment with this text so the upload hashes differently from earlier runs")
     args = ap.parse_args()
 
     mwdb = connect()
     content = FIXTURE.read_bytes()
+    if args.salt:
+        content += b"\n// malleus-smoke salt: " + args.salt.encode() + b"\n"
     uploads = [("weak.php", content, {})]
     if args.context_test:
         marker = b"// malleus-smoke context test\n"
