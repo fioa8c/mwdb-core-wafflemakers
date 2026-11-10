@@ -1,8 +1,8 @@
-# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf) and their sidecars
+# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf, malleus) and their sidecars
 services:
   mwdb:
     environment:
-      MWDB_PLUGINS: "yarax_regex,phpdeobf"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,malleus"
       MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
   phpdeobf:
     build:
