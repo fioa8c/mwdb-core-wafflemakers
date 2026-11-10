@@ -5,6 +5,11 @@
 #   ./compose.sh --with dev --with plugins --with karton --with malleus-dev ...
 # Also moves host ports that clash on this laptop (8081 = Kadath gateway, 8025-8026 = ddev mailhog) and gives the
 # Karton reporter the generated admin credentials.
+# Because the dev reporter logs in as the generated admin, the `malleus` plugin's reanalysis cleanup (which fires only
+# for logins in MWDB_MALLEUS_REPORTER_LOGINS, default `karton`) does not run on this overlay, so
+# `dev/malleus-smoke.py --reanalyze` needs a `karton` reporter account instead: create the user and group with the
+# capabilities from section 9 of deploy/DEPLOYMENT.md and point the reporter's KARTON_MWDB_USERNAME /
+# KARTON_MWDB_PASSWORD at it.
 # The web UI is then at http://127.0.0.1:8082 and the smoke script needs MWDB_URL=http://127.0.0.1:8082/api.
 services:
   redis:
