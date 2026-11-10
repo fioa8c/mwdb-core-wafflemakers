@@ -76,7 +76,7 @@ cp .env.example .env
 nano .env   # replace every placeholder
 ```
 
-`.env.example` documents each variable: `MWDB_DOMAIN` (Traefik host) and `ACME_EMAIL` (Let's Encrypt contact), plus the Karton stack's `VPC_BIND_IP` (this droplet's private/VPC address), `REDIS_PASSWORD`, `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, `KARTON_MWDB_API_KEY` and the optional `MWDB_MALLEUS_SET_GROUPS` / `MWDB_MALLEUS_READ_GROUPS`. Generate the secrets with `openssl rand -hex 24` (alphanumeric only: the Redis password is embedded in a `redis://` URI). The compose file refuses to start while a required variable is unset, so Redis and S3 can never end up published on all interfaces.
+`.env.example` documents each variable: `MWDB_DOMAIN` (Traefik host) and `ACME_EMAIL` (Let's Encrypt contact), plus the Karton stack's `VPC_BIND_IP` (this droplet's private/VPC address), `REDIS_PASSWORD`, `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, `KARTON_MWDB_API_KEY` and the optional `MWDB_MALLEUS_SET_GROUPS` / `MWDB_MALLEUS_READ_GROUPS` / `MWDB_MALLEUS_REPORTER_LOGINS`. Generate the secrets with `openssl rand -hex 24` (alphanumeric only: the Redis password is embedded in a `redis://` URI). The compose file refuses to start while a required variable is unset, so Redis and S3 can never end up published on all interfaces.
 
 Replace `MWDB_DOMAIN` with your actual domain (e.g., `mwdb.wafflemakers.xyz`) and `ACME_EMAIL` with the email for Let's Encrypt notifications. Find the VPC address with `ip -4 addr show eth1` (DigitalOcean's private interface; the address is also shown in the control panel under Networking).
 
@@ -197,7 +197,7 @@ The `mwdb-core` CLI in this repo has no user or API-key commands, so the account
 ### The `karton` reporter account
 
 1. Settings → Users → Create user. Login `karton`, any e-mail, turn off "Send e-mail with set password link". The account is used through its API key only and never logs in.
-2. Open the user → Capabilities (a user's capabilities are those of its private group, also named `karton`) and add: `access_all_objects`, `adding_tags`, `adding_comments`, `adding_parents`, `adding_files`, `adding_blobs`.
+2. Open the user → Capabilities (a user's capabilities are those of its private group, also named `karton`) and add: `access_all_objects`, `adding_tags`, `adding_comments`, `adding_parents`, `adding_files`, `adding_blobs`, `karton_assign`, and `unlimited_requests` if `MWDB_ENABLE_RATE_LIMIT=1` (section 3 recommends it). `karton_assign` is required: the reporter uploads every layer and LLM report with the analysis id of the sample's task, and MWDB answers 403 to that without it. The sample itself still gets its tags and attributes, so a missing `karton_assign` shows up only as missing children (step 4 of "Verify the pipeline").
 3. Open the user → Manage API keys, create a key and copy it. Put it in `.env` as `KARTON_MWDB_API_KEY`, then apply it:
 
 ```bash
@@ -206,7 +206,7 @@ docker compose -f docker-compose-prod.yml up -d karton-mwdb-reporter
 
 The reporter authenticates with this key only. It has no admin credentials and does not read `mwdb-vars.env`.
 
-Attribute rights (read and set on the Malleus attributes) are not capabilities. The `malleus` plugin creates the attribute definitions and the `AttributePermission` rows at MWDB startup for the groups named in `MWDB_MALLEUS_SET_GROUPS` (default `karton`) and `MWDB_MALLEUS_READ_GROUPS` (default `jetpack-scan,wpcloud-scan,elderward`); groups that do not exist yet are skipped. Create all accounts in this section first, then restart MWDB once:
+Attribute rights (read and set on the Malleus attributes) are not capabilities. The `malleus` plugin creates the attribute definitions and the `AttributePermission` rows at every MWDB start (`mwdb-core configure`) for the groups named in `MWDB_MALLEUS_SET_GROUPS` (default `karton`) and `MWDB_MALLEUS_READ_GROUPS` (default `jetpack-scan,wpcloud-scan,elderward`); groups that do not exist yet are skipped. Those two variables are the source of truth: the flags are rewritten on every start, and removing a group from them does not revoke its rows (delete them under Settings → Attributes → the key → Permissions). `MWDB_MALLEUS_REPORTER_LOGINS` (default `karton`) names the reporter login; a `source:` tag it creates is removed. Create all accounts in this section first, then restart MWDB once:
 
 ```bash
 docker compose -f docker-compose-prod.yml restart mwdb
@@ -216,6 +216,8 @@ docker compose -f docker-compose-prod.yml logs mwdb | grep -i malleus
 ### Scanner accounts
 
 Create one account per scanner, named exactly `jetpack-scan`, `wpcloud-scan` and `elderward` (same steps as above: no e-mail, API key only). Give each the capability `adding_tags` and nothing else. The plugin gives them read access to the Malleus attributes and write access to `context`, and rejects `source:` tags that do not carry the account's own login. Hand each scanner its own API key.
+
+Feeder contract for `context`: an upload whose `context` attribute holds keys other than `scanner`, `scanner_version`, `rules`, `path` and `engine` is rejected with HTTP 400 (`context attribute has disallowed keys: ...`), because MWDB hands the upload's attributes to Karton before any hook could strip them. A `context` added to an existing object later is stripped to the allowed keys and the object is tagged `wm:context-stripped`. A foreign `source:` tag is removed after the upload, but the Karton task already carries it, so a scanner key that tags `source:researcher` at upload still gets researcher depth for that task. This is an accepted residual: scanner keys belong to trusted internal systems.
 
 ### Researchers
 
@@ -248,14 +250,15 @@ Install and configure the worker following `deploy/worker/README.md` in the Mall
    docker compose -f docker-compose-prod.yml ps
    ```
 
-2. Upload a harmless test file with the tag `source:researcher` set at upload time (the task payload carries the tags present when the file is created). Either:
+2. Upload the harmless PHP test fixture `tests/fixtures/malleus/weak.php` from this checkout with the tag `source:researcher` set at upload time (the task payload carries the tags present when the file is created). It has to be PHP that reaches the LLM: Malleus answers anything that is not PHP, JS, HTML or `.htaccess` with `not-applicable` and creates no children, so step 4 cannot be checked with an arbitrary file. MWDB spawns no task for a file it already has, so on a later run append a line such as `$verify = '2026-11-10';` to a copy to get a new hash. Either:
 
    - Through the API, which accepts tags in the upload options (the web upload form does not). With `mwdblib`:
 
      ```python
      from mwdblib import MWDB
      mwdb = MWDB(api_url="https://YOUR_DOMAIN/api/", api_key="YOUR_API_KEY")
-     mwdb.upload_file("test.bin", b"harmless test content", tags=["source:researcher"])
+     content = open("tests/fixtures/malleus/weak.php", "rb").read()
+     mwdb.upload_file("weak.php", content, tags=["source:researcher"])
      ```
 
      or the equivalent `curl` (`POST /api/file`, multipart with the JSON `options` field):
@@ -263,7 +266,7 @@ Install and configure the worker following `deploy/worker/README.md` in the Mall
      ```bash
      curl -sf -X POST https://YOUR_DOMAIN/api/file \
        -H "Authorization: Bearer YOUR_API_KEY" \
-       -F "file=@test.bin" \
+       -F "file=@tests/fixtures/malleus/weak.php" \
        -F 'options={"tags":[{"tag":"source:researcher"}]}'
      ```
 
@@ -275,7 +278,7 @@ Install and configure the worker following `deploy/worker/README.md` in the Mall
    docker compose -f docker-compose-prod.yml logs -f karton-mwdb-reporter
    ```
 
-4. After a minute or two, the sample should carry a `verdict:*` tag and the Malleus attributes. If nothing arrives, check the worker's logs and that the worker can reach `VPC_BIND_IP:6379` and `:9000`.
+4. After a minute or two, the sample should carry a `verdict:*` tag and the Malleus attributes, and it must have children (Relations tab): at least one `llm-read` blob named `<sha256 prefix>-llm.json` (the LLM report) and the `deobfuscated-php` blobs, one per peeled layer (`<sha256 prefix>-c.php`, `-co.php`, ...). The reporter log must show no `403` / `Forbidden`. A sample with its verdict but without children means the `karton` account lacks `karton_assign` (step 2 of "The `karton` reporter account"). If nothing arrives at all, check the worker's logs and that the worker can reach `VPC_BIND_IP:6379` and `:9000`.
 
 ## 10. PostgreSQL backups
 

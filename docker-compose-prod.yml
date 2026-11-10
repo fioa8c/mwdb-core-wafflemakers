@@ -60,6 +60,7 @@ services:
       MWDB_PHPDEOBF_URL: http://phpdeobf:8080
       MWDB_MALLEUS_SET_GROUPS: ${MWDB_MALLEUS_SET_GROUPS:-karton}
       MWDB_MALLEUS_READ_GROUPS: ${MWDB_MALLEUS_READ_GROUPS:-jetpack-scan,wpcloud-scan,elderward}
+      MWDB_MALLEUS_REPORTER_LOGINS: ${MWDB_MALLEUS_REPORTER_LOGINS:-karton}
       # MWDB_SANDBOX_URL must stay unset here: the synchronous PHP normalize
       # hook would add a normalized-php child per upload (see DEPLOYMENT.md).
     volumes:
