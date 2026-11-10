@@ -33,16 +33,16 @@ npx prettier --check src    # what CI runs
 
 ### Running the full stack
 
-`docker-compose-dev.yml` is the canonical dev environment (mounts `./mwdb`, `./mwdb/web/src`, and `./docker/plugins` into the containers and enables `HOT_RELOAD=1`). First generate env files, then bring it up:
+Compose is modular: `compose.sh` wraps `docker compose -f docker-compose.yml` (production-like base) and layers `compose/compose.with-<feature>.yml` for each `--with <feature>`. `--with dev` is the dev environment (mounts `./mwdb`, `./mwdb/web/src`, and `./docker/plugins` into the containers and enables `HOT_RELOAD=1`); in this fork also add `--with plugins` (see below). First generate env files, then bring it up:
 
 ```bash
 ./gen_vars.sh            # writes mwdb-vars.env + postgres-vars.env (random admin pw, printed)
 ./gen_vars.sh test       # variant that disables hooks and rate limiting, for tests
-docker compose -f docker-compose-dev.yml up --build
+./compose.sh --with dev --with plugins up --build
 # app at http://localhost:80, admin login printed by gen_vars.sh
 ```
 
-Other compose files target specific scenarios: `docker-compose-dev-karton.yml` (Karton pipeline), `docker-compose-dev-remote.yml` (federated remotes), `docker-compose-oidc-dev.yml` (OIDC), `docker-compose-e2e.yml` (backend + Cypress e2e), `docker-compose-unit-test.yml` (frontend jest).
+Other features: `--with karton` (Karton pipeline), `--with s3` (S3 storage via silo), `--with oidc` (OIDC), `--with e2e` (backend + Cypress e2e). `./compose.sh --help` lists them. Frontend jest runs via `compose/compose.web-unit-tests.yml`.
 
 ### Tests
 
@@ -51,7 +51,7 @@ Backend e2e tests (`tests/backend/`) hit a running MWDB via HTTP — they are **
 ```bash
 # Start stack with test-mode env:
 ./gen_vars.sh test
-docker compose -f docker-compose-dev.yml up -d
+./compose.sh --with dev --with plugins up -d
 # Then, from tests/backend:
 export MWDB_ADMIN_LOGIN=admin
 export MWDB_ADMIN_PASSWORD=...      # from mwdb-vars.env
@@ -61,11 +61,11 @@ uv run pytest -k attributes          # single test by keyword
 uv run pytest test_search.py         # single file
 ```
 
-Frontend e2e (`tests/frontend/`) is Cypress, driven by `docker-compose-e2e.yml`.
+Frontend e2e (`tests/frontend/`) is Cypress, driven by `./compose.sh --with e2e`.
 
 ### Debug UI for plugin extension points
 
-Set `VITE_EXTENDABLE_DEBUG_BOX=1` in the `mwdb-web` service env (commented in `docker-compose-dev.yml`) to render labelled boxes around every `<Extendable>` slot in the SPA. Useful when a plugin needs to discover where it can hook in.
+Set `VITE_EXTENDABLE_DEBUG_BOX=1` in the `mwdb-web` service env (commented in `compose/compose.with-dev.yml`) to render labelled boxes around every `<Extendable>` slot in the SPA. Useful when a plugin needs to discover where it can hook in.
 
 ## Architecture
 
@@ -108,5 +108,42 @@ Entry is `mwdb/web/src/index.jsx` → `App.tsx`. Route views are under `componen
 
 - **Versioning is semver and coupled**: a version bump belongs in the same PR as the change when `setup.py`/`mwdb.version` matches the latest release. Use `python3 dev/bump_version <new-version>` (see `CONTRIBUTING.md`).
 - **Python ≥ 3.10**, pinned deps in `pyproject.toml`. SQLAlchemy is 1.4 (classic-style queries), Flask 3, Marshmallow 3, Flask-RESTful. Do not upgrade without intent.
-- **Pre-commit** (`.pre-commit-config.yaml`) runs ruff (`--select I` + format) on commit and regenerates `tests/backend/requirements.txt` from the `test` dep group via `uv export`. Don't hand-edit that requirements file.
+- **Pre-commit** (`.pre-commit-config.yaml`) runs ruff (`--select I` + format) on commit. Backend test deps live in the `test` dep group of `pyproject.toml` (there is no separate `tests/backend/requirements.txt` any more).
 - **Deprecation path** for legacy APIs uses `mwdb.core.deprecated.uses_deprecated_api(...)`. The legacy `/meta/...` endpoints in `resources/metakey.py` are the canonical example — new work should go through `/attribute/...`.
+
+## Fork-specific additions (Waffle Makers)
+
+This is a fork of CERT.pl's mwdb-core with in-tree plugins, extra CLI commands and a production deployment. Upstream conventions above still apply.
+
+**Product direction:** this fork is meant to be the single source of truth for Automattic's malware researchers — not just where samples are stored, but where they are *processed*. Analysis tooling (PHPDeobfuscator, regex/YARA playgrounds, sandbox runs, future analyzers) belongs inside MWDB as in-tree plugins (a tab on the sample page + a REST resource), Karton-style sidecar services, or `mwdb-core` CLI commands — not as standalone scripts or external UIs. When asked to add an analysis capability, default to integrating it here following the plugin pattern below.
+
+### In-tree plugins (`docker/plugins/`)
+
+Each plugin is a single directory that is **both** a Python package (`pyproject.toml`, `__init__.py` exposing `entrypoint(app_context)`) **and** an npm package (`package.json` named `@mwdb-web/plugin-<name>`, `index.tsx` default-exporting the FE hooks such as `sampleTabsAfter`). The Docker images pick them up automatically: `deploy/docker/Dockerfile` pip-installs every dir with a `pyproject.toml`, and `Dockerfile-web` npm-installs every dir with a `package.json`; vite then exposes them via the virtual module `@mwdb-web/plugins`.
+
+Because they are pip-installed into site-packages (not autodiscovered from `/app/plugins`), backend plugins must be listed explicitly in `MWDB_PLUGINS` in both `compose/compose.with-plugins.yml` (the fork-owned dev overlay, which also defines plugin sidecars like `phpdeobf`) and `docker-compose-prod.yml` — a new plugin needs that line updated in both files. Keep fork additions in that overlay rather than editing upstream's `compose/compose.with-dev.yml`, so upstream syncs merge cleanly.
+
+- `yarax_regex` — YARA-X live regex playground tab; `POST /api/yarax/regex`.
+- `phpdeobf` — "PHP Deobfuscate" tab; `POST /api/phpdeobf/<hash>` calls the `phpdeobf` sidecar (`MWDB_PHPDEOBF_URL`, default `http://phpdeobf:8080`) and creates a `TextBlob` child with `blob_type="deobfuscated-php"`. See `docker/plugins/phpdeobf/README.md`.
+
+The sidecar's PHP source in `docker/phpdeobf/` is **vendored** from `~/WORK/PHPDeobfuscator/` — don't edit it in place; refresh with `bash docker/phpdeobf/sync-from-source.sh` and commit.
+
+Plugin tests (unit, sidecar mocked — no stack needed):
+
+```bash
+cd docker/plugins/phpdeobf && python -m pytest tests/ -v
+cd docker/plugins/yarax_regex && python -m pytest tests/ -v
+php docker/phpdeobf/tests/server_test.php     # sidecar HTTP wrapper
+cd tests/backend && uv run pytest test_phpdeobf.py -v   # e2e, needs running stack
+```
+
+### Extra `mwdb-core` CLI commands (`mwdb/cli/`)
+
+- `import-jetpack-threat-library <dir>` — bulk import of the threat library.
+- `normalize-php <sandbox-url>` / `evalhook-php <sandbox-url>` — batch PHP deobfuscation / eval() analysis against the PHP sandbox service.
+
+The sandbox comes from a sibling checkout `../waffle-makers-tooling` and is only started on demand via `docker-compose-sandbox.yml` layered on top of the prod compose. Run batch commands with `MWDB_ENABLE_HOOKS=0` so plugin hooks don't fire per object (exact invocations in `deploy/DEPLOYMENT.md`).
+
+### Production
+
+`docker-compose-prod.yml` (Traefik v3 + Let's Encrypt, `.env` with `MWDB_DOMAIN`/`ACME_EMAIL`) is deployed to a Digital Ocean droplet; `deploy/DEPLOYMENT.md` is the runbook, including backup/restore, cross-host Postgres migration and firewall gotchas. Read it before touching the prod compose file.
