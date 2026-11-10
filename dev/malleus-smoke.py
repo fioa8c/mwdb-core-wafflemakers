@@ -72,9 +72,11 @@ def wait_for_verdict(mwdb, sha256, timeout, old_analyses=None):
         obj = mwdb.query_file(sha256)
         obj.flush()
         attrs = obj.attributes
-        fresh = [a for a in attrs.get("malleus_analysis", []) if a not in old_analyses]
-        if attrs.get("malleus_verdict") and (old_analyses is None or fresh):
-            return obj, attrs
+        if attrs.get("malleus_verdict"):
+            if old_analyses is None:
+                return obj, attrs
+            if any(a not in old_analyses for a in attrs.get("malleus_analysis", [])):
+                return obj, attrs
         if time.time() >= deadline:
             return obj, None
         print("waiting for malleus_verdict ...", flush=True)

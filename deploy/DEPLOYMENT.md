@@ -323,7 +323,7 @@ To roll back, set `sandbox_mode = never` and restart `malleus-static` first, the
 
 ### Containment check before real samples
 
-Run this once, as part of step 3: after the manual offering succeeds and before `malleus-detonate` is enabled in step 5, so that no real sample goes through Kadath first and the worker's Kadath is not in use (the worker README reserves it for the service once that runs). The probe is Malleus `tests/fixtures/kadath/probe.php`, a benign file that tries `fsockopen(MWDB_VPC_IP, 6379)`, `fsockopen(MWDB_VPC_IP, 9000)` and `file_get_contents("http://169.254.169.254/metadata/v1/id")` and echoes the result of each. On the worker:
+Run this once, as part of step 3: after the manual offering succeeds and before `malleus-detonate` is enabled in step 5, so that no real sample goes through Kadath first and the worker's Kadath is not in use (the worker README reserves it for the service once that runs). The probe is Malleus `tests/fixtures/kadath/probe.php`, a benign file that tries `fsockopen(MWDB_VPC_IP, 6379)`, `fsockopen(MWDB_VPC_IP, 9000)` and `file_get_contents("http://169.254.169.254/metadata/v1/id")` (the probe throws a `RuntimeException` instead of probing if `MWDB_VPC_IP` was not replaced). On the worker:
 
 ```bash
 cp /opt/malleus/tests/fixtures/kadath/probe.php /tmp/probe.php
@@ -333,11 +333,15 @@ sudo -u malleus -H python3 bin/kadath offer --json --stub-missing --adopt-wp /tm
 rm /tmp/probe.php
 ```
 
-The `sed` also rewrites the probe's comment lines, which is harmless. If the printed output says `PLACEHOLDER NOT REPLACED`, nothing was tested. Do not commit the substituted copy.
+The `sed` also rewrites the probe's comment lines and its guard message, which is harmless.
 
-Pass criterion, read from the printed `summary.json`: `network.flows` has no entry whose host is the MWDB VPC address or `169.254.169.254`, and `network.dropped` lists the MWDB VPC address on 6379 and 9000. Kadath may instead block a destination at its proxy, which then shows as neither a flow nor a drop. In that case read `artifacts/` (`grep -a ... | cat -v` for the host and the probe's output lines) and confirm no response came back before calling it blocked.
+Kadath records only the HTTP status of the trigger and `offer --json` prints only the path of `summary.json`, so the probe's own output is never shown. Read the result from that `summary.json` alone. The check has passed only if all three hold:
 
-If any probe connects, stop: Kadath's `GATEWAY_BLOCKED_DESTS` must cover the VPC range and the metadata address before any sample runs. Do not enable `sandbox_mode = auto` until the check passes.
+- `run.fatals` does not contain `PLACEHOLDER NOT REPLACED` (if it does, the substitution was skipped and nothing was tested).
+- `network.dropped` lists the MWDB VPC address on port 6379 and on port 9000.
+- `network.flows` has no entry for the MWDB VPC address or for `169.254.169.254`.
+
+If `network.dropped` does not list both VPC ports, the check has NOT passed, even if no flow shows up: investigate before any real sample runs (check `GATEWAY_BLOCKED_DESTS` in Kadath's `.env` and the default in `gateway/entrypoint.sh`, which must cover the VPC range and the metadata address). Do not enable `sandbox_mode = auto` until it passes. Never commit the real address or the substituted copy.
 
 ### Verify the pipeline
 
@@ -393,6 +397,7 @@ If any probe connects, stop: Kadath's `GATEWAY_BLOCKED_DESTS` must cover the VPC
 
 - `malleus-detonate` (or `malleus-static`) is not running or keeps restarting: both units run a preflight (`malleus-preflight`) before starting and systemd retries a failing one with a growing delay (30 s up to 600 s). There is no start limit (`StartLimitIntervalSec=0`), so the unit is never left permanently failed and recovers on its own once the cause is fixed. Read `journalctl -u malleus-detonate` for the preflight's problem lines (a missing binary or checkout, Docker or Compose not usable, Kadath not set up) and fix the cause. `systemctl restart malleus-detonate` retries immediately instead of waiting out the delay.
 - An object has no verdict after a hard kill (SIGKILL or the out-of-memory killer, which the consumers' crash handler cannot catch): open the sample in MWDB and press Reanalyze on the Karton panel (needs `karton_reanalyze`). The reanalysis replaces whatever the interrupted run left behind.
+- Do not restart a crashed Malleus task from a Karton dashboard to recover it: that re-posts the same `malleus_analysis` value, so the reanalysis cleanup does not fire and the old run's attributes and tags stay. Use Reanalyze on the sample page instead (production deploys no dashboard).
 - A sample ended `undetermined` with a reason starting `sandbox: error` (Kadath busy or timed out) or `analysis crashed:`: the same, press Reanalyze after fixing the cause in the worker's journal.
 
 ## 10. PostgreSQL backups
