@@ -1,6 +1,11 @@
 # Publish Redis on localhost so malleus-static running on the laptop can reach the dev stack
 # Needed only for running a local `malleus-static`; silo (S3) is already published by compose.silo.yml.
+# The web UI is then at http://127.0.0.1:8081 and the smoke script needs MWDB_URL=http://127.0.0.1:8081/api.
 services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
+  mwdb-web:
+    # The dev overlay publishes the SPA on port 80, which is often taken on a laptop; use 8081 instead.
+    ports: !override
+      - "127.0.0.1:8081:3000"
