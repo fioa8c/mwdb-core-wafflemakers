@@ -13,12 +13,14 @@ postgres_password.txt
 mwdb-vars.env
 postgres-vars.env
 .env
+karton.ini
 .mypy_cache/
 # Ignore externally-installed plugins (upstream pattern), but track the
 # fork's in-tree team plugins that ship with the repo.
 docker/plugins/*/
 !docker/plugins/yarax_regex/
 !docker/plugins/phpdeobf/
+!docker/plugins/malleus/
 !docker/plugins/threatlib/
 docker/mail_templates/
 tests/frontend/cypress/videos/

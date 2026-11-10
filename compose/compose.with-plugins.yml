@@ -1,8 +1,8 @@
-# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf, threatlib) and their sidecars
+# Enables Waffle Makers in-tree plugins (yarax_regex, phpdeobf, threatlib, malleus) and their sidecars
 services:
   mwdb:
     environment:
-      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib,malleus"
       MWDB_PHPDEOBF_URL: "http://phpdeobf:8080"
   phpdeobf:
     build:
@@ -20,7 +20,7 @@ services:
     env_file:
       - mwdb-vars.env
     environment:
-      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib"
+      MWDB_PLUGINS: "yarax_regex,phpdeobf,threatlib,malleus"
       MWDB_ENABLE_HOOKS: "0"
       # Dev default: sync against a local bare repo mounted at /data/origin.git.
       # Create it with:  git init --bare -b trunk ./dev-threatlib-origin.git

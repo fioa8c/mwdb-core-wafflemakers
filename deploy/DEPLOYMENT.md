@@ -69,16 +69,24 @@ echo "MWDB_ENABLE_RATE_LIMIT=1" >> mwdb-vars.env
 echo "MWDB_ENABLE_REGISTRATION=0" >> mwdb-vars.env
 ```
 
-Create a `.env` file for the compose variables (Traefik domain + ACME email):
+Create the `.env` file for the compose variables from the template:
 
 ```bash
-cat > .env << EOF
-MWDB_DOMAIN=YOUR_DOMAIN
-ACME_EMAIL=YOUR_EMAIL
-EOF
+cp .env.example .env
+nano .env   # replace every placeholder
 ```
 
-Replace `YOUR_DOMAIN` with your actual domain (e.g., `mwdb.wafflemakers.xyz`) and `YOUR_EMAIL` with the email for Let's Encrypt notifications.
+`.env.example` documents each variable: `MWDB_DOMAIN` (Traefik host) and `ACME_EMAIL` (Let's Encrypt contact), plus the Karton stack's `VPC_BIND_IP` (this droplet's private/VPC address), `REDIS_PASSWORD`, `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, `KARTON_MWDB_API_KEY` and the optional `MWDB_MALLEUS_SET_GROUPS` / `MWDB_MALLEUS_READ_GROUPS` / `MWDB_MALLEUS_REPORTER_LOGINS`. Generate the secrets with `openssl rand -hex 24` (alphanumeric only: the Redis password is embedded in a `redis://` URI). The compose file refuses to start while a required variable is unset, so Redis and S3 can never end up published on all interfaces.
+
+Replace `MWDB_DOMAIN` with your actual domain (e.g., `mwdb.wafflemakers.xyz`) and `ACME_EMAIL` with the email for Let's Encrypt notifications. Find the VPC address with `ip -4 addr show eth1` (DigitalOcean's private interface; the address is also shown in the control panel under Networking).
+
+Create `karton.ini` from the template. It holds no secrets (those come from `.env`), so normally it needs no edits:
+
+```bash
+cp deploy/karton.ini.example karton.ini
+```
+
+`KARTON_MWDB_API_KEY` is only known after you create the `karton` user (section 9). Put any non-empty placeholder in `.env` for now; the stack starts, and the reporter fails authentication until you replace it.
 
 ## 4. DNS and firewall
 
@@ -95,6 +103,8 @@ validators are blocked, certificate issuance fails with `Timeout during
 connect (likely firewall problem)` and traefik keeps serving its self-signed
 default cert. If you use a Digital Ocean cloud firewall, allow 80/443 from
 `Anywhere (IPv4 + IPv6)`.
+
+Redis (6379) and S3 (9000) are the opposite case: reachable from the worker droplet's VPC address only. Rules are in section 9.
 
 ## 5. Build and start
 
@@ -114,6 +124,7 @@ Look for:
 - `mwdb-1`: `Configuring mwdb-core instance` → `Listening at: http://0.0.0.0:8080`
 - `traefik-1`: `Obtaining certificate...` → `Certificate obtained successfully`
 - `mwdb-web-1`: nginx startup message
+- `karton-system-router-1`: starts once Redis and S3 (`silo`) are healthy
 
 Once you see all three, the app is live at `https://YOUR_DOMAIN`.
 
@@ -171,7 +182,105 @@ Stop the sandbox when done:
 docker compose -f docker-compose-prod.yml -f docker-compose-sandbox.yml stop sandbox
 ```
 
-## 9. PostgreSQL backups
+## 9. Karton and the worker droplet
+
+The prod stack runs a Karton pipeline: MWDB hands every upload to Karton (`karton-system-router`, `karton-classifier`), and the Malleus `malleus-static` service on a second droplet in the same VPC analyses it and sends results back through `karton-mwdb-reporter`, which writes attributes and tags to MWDB. Redis (6379) and S3/silo (9000), which Karton uses as message bus and resource store, are published on this droplet's VPC address only so the worker can reach them.
+
+The depth of analysis is decided from the tags present on the object when the Karton task is spawned (at upload), so feeders must tag at upload; a tag added later has no effect until the object is reanalysed.
+
+### Configuration files
+
+Done in section 3: `.env` from `.env.example` (including `VPC_BIND_IP`, `REDIS_PASSWORD`, `SILO_ACCESS_KEY`, `SILO_SECRET_KEY`) and `karton.ini` from `deploy/karton.ini.example`. Secrets are injected as karton-core environment overrides (`KARTON_REDIS_PASSWORD`, `KARTON_S3_ACCESS_KEY`, ...) and never written to `karton.ini`. Start the stack (section 5) before continuing.
+
+The `mwdb-core` CLI in this repo has no user or API-key commands, so the accounts below are created in the web UI as the admin user.
+
+### The `karton` reporter account
+
+1. Settings → Users → Create user. Login `karton`, any e-mail, turn off "Send e-mail with set password link". The account is used through its API key only and never logs in.
+2. Open the user → Capabilities (a user's capabilities are those of its private group, also named `karton`) and add: `access_all_objects`, `adding_tags`, `adding_comments`, `adding_parents`, `adding_files`, `adding_blobs`, `karton_assign`, and `unlimited_requests` if `MWDB_ENABLE_RATE_LIMIT=1` (section 3 recommends it). `karton_assign` is required: the reporter uploads every layer and LLM report with the analysis id of the sample's task, and MWDB answers 403 to that without it. The sample itself still gets its tags and attributes, so a missing `karton_assign` shows up only as missing children (step 4 of "Verify the pipeline").
+3. Open the user → Manage API keys, create a key and copy it. Put it in `.env` as `KARTON_MWDB_API_KEY`, then apply it:
+
+```bash
+docker compose -f docker-compose-prod.yml up -d karton-mwdb-reporter
+```
+
+The reporter authenticates with this key only. It has no admin credentials and does not read `mwdb-vars.env`.
+
+Attribute rights (read and set on the Malleus attributes) are not capabilities. The `malleus` plugin creates the attribute definitions and the `AttributePermission` rows at every MWDB start (`mwdb-core configure`) for the groups named in `MWDB_MALLEUS_SET_GROUPS` (default `karton`) and `MWDB_MALLEUS_READ_GROUPS` (default `jetpack-scan,wpcloud-scan,elderward`); groups that do not exist yet are skipped. Those two variables are the source of truth: the flags are rewritten on every start, and removing a group from them does not revoke its rows (delete them under Settings → Attributes → the key → Permissions). `MWDB_MALLEUS_REPORTER_LOGINS` (default `karton`) names the reporter login; a `source:` tag it creates is removed. Create all accounts in this section first, then restart MWDB once:
+
+```bash
+docker compose -f docker-compose-prod.yml restart mwdb
+docker compose -f docker-compose-prod.yml logs mwdb | grep -i malleus
+```
+
+### Scanner accounts
+
+Create one account per scanner, named exactly `jetpack-scan`, `wpcloud-scan` and `elderward` (same steps as above: no e-mail, API key only). Give each the capability `adding_tags` and nothing else. The plugin gives them read access to the Malleus attributes and write access to `context`, and rejects `source:` tags that do not carry the account's own login. Hand each scanner its own API key.
+
+Feeder contract: send `context` and the `source:<scanner>` tag in the upload options (`POST /api/file` with the `options` form field carrying `attributes` and `tags`). Attributes and tags added after the upload never reach the Karton consumer unless the object is reanalysed, so a `context` added later is only stripped and stored, not used by the analysis. For `context`: an upload whose `context` attribute holds keys other than `scanner`, `scanner_version`, `rules`, `path` and `engine` is rejected with HTTP 400 (`context attribute has disallowed keys: ...`), because MWDB hands the upload's attributes to Karton before any hook could strip them. A `context` added to an existing object later is stripped to the allowed keys and the object is tagged `wm:context-stripped`. A foreign `source:` tag is removed after the upload, but the Karton task already carries it, so a scanner key that tags `source:researcher` at upload still gets researcher depth for that task. This is an accepted residual: scanner keys belong to trusted internal systems.
+
+### Researchers
+
+Give the researchers' group the capabilities `reading_all_attributes` (to read the Malleus attributes) and `karton_reanalyze` (to resend a sample to Karton with its current tags), under Settings → Groups → the group → Capabilities. Scanner accounts keep `adding_tags` only, and the `karton` user does not need `karton_reanalyze`.
+
+### Keep `MWDB_SANDBOX_URL` unset
+
+Do not set `MWDB_SANDBOX_URL` on `mwdb` in `.env`, `mwdb-vars.env` or the compose file. When it is set, the synchronous PHP normalize hook runs on every upload and adds a `normalized-php` child per sample next to the layers the pipeline produces. Batch normalization stays available through the CLI in section 8.
+
+### Firewall
+
+Redis (6379) and S3/silo (9000) must be reachable from the worker droplet's VPC address only, never from the public internet. Compose already publishes both on `VPC_BIND_IP` only. Add the matching rules at the firewall (WORKER_VPC_IP is the worker's private address):
+
+```bash
+ufw allow from WORKER_VPC_IP to any port 6379 proto tcp
+ufw allow from WORKER_VPC_IP to any port 9000 proto tcp
+```
+
+Docker-published ports bypass `ufw`'s rules, so also add the same restriction to the DigitalOcean cloud firewall: inbound TCP 6379 and 9000 from the worker droplet only, and nothing from `Anywhere`. Verify from a machine outside the VPC that `nc -vz YOUR_DROPLET_IP 6379` and `nc -vz YOUR_DROPLET_IP 9000` fail.
+
+### Worker droplet
+
+Install and configure the worker following `deploy/worker/README.md` in the Malleus repository. Its `karton.ini` points at `VPC_BIND_IP`: Redis `host` with the `REDIS_PASSWORD`, S3 `address = http://VPC_BIND_IP:9000` with `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, bucket `karton`.
+
+### Verify the pipeline
+
+1. Check that every Karton service is up:
+
+   ```bash
+   docker compose -f docker-compose-prod.yml ps
+   ```
+
+2. Upload the harmless PHP test fixture `tests/fixtures/malleus/weak.php` from this checkout with the tag `source:researcher` set at upload time (the task payload carries the tags present when the file is created). It has to be PHP that reaches the LLM: Malleus answers anything that is not PHP, JS, HTML or `.htaccess` with `not-applicable` and creates no children, so step 4 cannot be checked with an arbitrary file. MWDB spawns no task for a file it already has, so on a later run append a line such as `$verify = '2026-11-10';` to a copy to get a new hash. Either:
+
+   - Through the API, which accepts tags in the upload options (the web upload form does not). With `mwdblib`:
+
+     ```python
+     from mwdblib import MWDB
+     mwdb = MWDB(api_url="https://YOUR_DOMAIN/api/", api_key="YOUR_API_KEY")
+     content = open("tests/fixtures/malleus/weak.php", "rb").read()
+     mwdb.upload_file("weak.php", content, tags=["source:researcher"])
+     ```
+
+     or the equivalent `curl` (`POST /api/file`, multipart with the JSON `options` field):
+
+     ```bash
+     curl -sf -X POST https://YOUR_DOMAIN/api/file \
+       -H "Authorization: Bearer YOUR_API_KEY" \
+       -F "file=@tests/fixtures/malleus/weak.php" \
+       -F 'options={"tags":[{"tag":"source:researcher"}]}'
+     ```
+
+   - Or through the web UI: upload the file, add the tag `source:researcher` on the sample page, then press Reanalyze on the sample's Karton panel. A tag added after upload does nothing until Reanalyze resends the task with the current tags; the button needs the `karton_reanalyze` capability.
+
+3. Watch the reporter:
+
+   ```bash
+   docker compose -f docker-compose-prod.yml logs -f karton-mwdb-reporter
+   ```
+
+4. After a minute or two, the sample should carry a `verdict:*` tag and the Malleus attributes, and it must have children (Relations tab): at least one `llm-read` blob named `<sha256 prefix>-llm.json` (the LLM report) and the `deobfuscated-php` blobs, one per peeled layer (`<sha256 prefix>-c.php`, `-co.php`, ...). The reporter log must show no `403` / `Forbidden`. A sample with its verdict but without children means the `karton` account lacks `karton_assign` (step 2 of "The `karton` reporter account"). If nothing arrives at all, check the worker's logs and that the worker can reach `VPC_BIND_IP:6379` and `:9000`.
+
+## 10. PostgreSQL backups
 
 ### Automated daily backup
 
@@ -236,15 +345,18 @@ docker compose -f docker-compose-prod.yml restart mwdb
 The matching `mwdb-uploads` volume should also be transferred — see the
 "Uploads" note under Security.
 
-## 10. Maintenance
+## 11. Maintenance
 
 ### Updates
 
 ```bash
 cd /home/mwdb/mwdb-core-wafflemakers
 git pull
+docker compose -f docker-compose-prod.yml pull   # Karton, silo and Redis images
 docker compose -f docker-compose-prod.yml up -d --build
 ```
+
+Changes to `karton.ini` or `.env` need the affected services recreated (`up -d` does this for `.env`; `restart` the Karton services after editing `karton.ini`). Update the worker droplet separately (see its README).
 
 ### Recomputing file types
 
@@ -269,6 +381,7 @@ docker compose -f docker-compose-prod.yml logs -f mwdb        # backend
 docker compose -f docker-compose-prod.yml logs -f mwdb-web     # nginx
 docker compose -f docker-compose-prod.yml logs -f traefik      # TLS proxy
 docker compose -f docker-compose-prod.yml logs -f postgres     # database
+docker compose -f docker-compose-prod.yml logs -f karton-mwdb-reporter  # Karton results into MWDB
 ```
 
 ### Restart a single service
@@ -341,7 +454,7 @@ docker compose -f docker-compose-prod.yml exec postgres \
 
 ## Security notes
 
-- **Firewall:** Only ports 80 and 443 should be open. PostgreSQL (5432), Redis (6379), and gunicorn (8080) are internal-only (no `ports:` exposed to host in the compose file).
+- **Firewall:** Only ports 80 and 443 should be open to the public. PostgreSQL (5432) and gunicorn (8080) are internal-only (no `ports:` exposed to host in the compose file). Redis (6379) and S3/silo (9000) are published on the VPC address only and must be reachable from the worker droplet alone (section 9). Redis requires a password; `karton-dashboard` is not deployed because it has no authentication.
 - **Admin password:** Change after first login via the SPA (Profile → Change Password). The gen_vars.sh password is for initial setup only.
 - **TLS:** Managed automatically by Traefik + Let's Encrypt. Certificates auto-renew. HTTP → HTTPS redirect is configured.
 - **Uploads:** Stored on a Docker volume (not exposed to host filesystem). Back up the `mwdb-uploads` volume alongside the database if you need full disaster recovery.
