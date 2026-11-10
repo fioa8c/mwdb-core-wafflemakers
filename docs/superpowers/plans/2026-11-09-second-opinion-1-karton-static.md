@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Two repositories: Malleus (`/Users/fioa8c/WORK/Malleus-Monstrorum`, tasks 1–5) and this fork (tasks 6–8). Each task commits in its own repo.
+- Two repositories: Malleus (`/Users/fioa8c/WORK/Malleus-Monstrorum`, tasks 0–5) and this fork (tasks 6–8). Each task commits in its own repo.
 - Malleus core stays dependency-free; the Karton layer is the optional extra `service = ["karton-core>=5.9,<6"]` and lives under `malleus/service/`.
 - Attribute keys match `^[A-Za-z0-9_-]{1,32}$`: `malleus_verdict`, `malleus_confidence`, `malleus_reasons`, `malleus_stages`, `malleus_depth`, `malleus_gate`, `malleus_gate_disagreement`, `malleus_rules_commit`, `malleus_unlocked`, `malleus_model`, `malleus_prompt_sha256`, `malleus_llm`, `context`, and on blobs `layer_variant`, `layer_unlocked`. The list is defined once per repo (`malleus/service/payloads.py` and `docker/plugins/malleus/attributes.py`) and both files carry the comment `# keep in sync with <other path>`.
 - Tags: `source:<caller>`, `verdict:<v>`, `yara:<rule>`, `wm:needs-review`, `wm:context-stripped`, `wm:source-stripped`. Verdict values: `known-bad`, `malicious`, `likely-malicious`, `likely-benign`, `undetermined`, `no-hit`, `not-applicable`. Untagged objects get no verdict and no attributes.
@@ -29,6 +29,57 @@
 - The rules clone advancing between two tasks: the second task's `malleus_rules_commit` differs and the `.yarc` is recompiled once. Test in Task 4.
 
 ---
+
+### Task 0: Full-depth run and sandbox-stage helper (Malleus)
+
+Added after the Phase 0 final review: `run_static` skips the deobfuscation and model stages whenever the hub gate has no weak or unknown hits, so the spec's full depth (researcher uploads, reanalyses, section 4.1) could never run them; the sandbox stage dict and its try/except live only in `cli.process_file`, which Task 4 would have to duplicate; and `StaticResult.as_dict()` carries `llm_messages` (the numbered sample source and layers), which must not travel in a Karton payload.
+
+**Files:**
+- Modify: `malleus/pipeline.py` (`StaticResult`, `run_static`, `sandbox_decision`, new `run_sandbox_stage`), `malleus/cli.py` (`process_file` uses the helper)
+- Test: `tests/test_pipeline.py`
+
+**Interfaces:**
+- Produces:
+  ```python
+  @dataclass
+  class StaticResult:  # existing fields, then:
+      forced: bool = False       # True when run_static(force=True) bypassed the gate shortcut
+      def as_dict(self) -> dict  # no longer includes "llm_messages"; adds "forced"
+  def run_static(sample: Path, hits: Set[str], settings: Settings, work_dir: Path,
+                 sha256: Optional[str] = None, force: bool = False) -> StaticResult
+      # force=True: a gate with no weak/unknown hits still runs deobf and llm (rule lines are empty);
+      # a known-bad gate is never overridden; every stage dict and reason string stays as today
+  def sandbox_decision(res: StaticResult, settings: Settings) -> Tuple[bool, str]
+      # the "no weak hits" shortcut is skipped when res.forced; "known-bad" still short-circuits
+  def run_sandbox_stage(sample: Path, res: StaticResult, settings: Settings) -> Tuple[Optional[SandboxResult], dict]
+      # sandbox_decision -> (None, skipped stage) | run_sandbox -> (sb, {"status": sb.status, "reason": sb.reason or why,
+      #   "evidence": ..., "duration": round(sb.duration, 3)}) | exception -> (None, {"status": "error", "reason": f"{type(e).__name__}: {e}", "duration": ...})
+      # exactly the dicts cli.process_file builds today; the kadath.json write stays in the CLI (it needs sb.summary)
+  ```
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_run_static_force_runs_stages_on_empty_gate(tmp_path):
+    res = pipeline.run_static(sample, set(), settings, tmp_path / "w", force=True)
+    assert res.forced and res.stages["deobf"]["status"] == "ok" and res.llm is not None
+def test_run_static_force_does_not_override_known_bad(tmp_path):
+    res = pipeline.run_static(sample, {"strong_r"}, settings, tmp_path / "w", force=True)
+    assert res.stages["llm"]["reason"] == "known-bad" and not res.forced
+def test_sandbox_decision_runs_for_forced_empty_gate(tmp_path):
+    # forced result, llm green, sandbox_mode "always", kadath present -> (True, ...)
+def test_run_sandbox_stage_turns_exception_into_error_stage(tmp_path):
+    # offerer raises -> (None, {"status": "error", "reason": "RuntimeError: boom", ...})
+def test_run_sandbox_stage_skipped_when_decision_false(tmp_path):
+    assert stage == {"status": "skipped", "reason": "no weak hits", "duration": 0.0}
+def test_as_dict_has_no_llm_messages():
+    assert "llm_messages" not in res.as_dict() and res.as_dict()["forced"] is False
+```
+
+- [ ] **Step 2: Run to verify failure** → `python3 -m pytest tests/test_pipeline.py -q` fails with `TypeError: ... unexpected keyword argument 'force'`
+- [ ] **Step 3: Implement**; rewrite the sandbox block of `cli.process_file` as `sb, sandbox_stage = pipeline.run_sandbox_stage(path, res, settings)` followed by the `kadath.json` write when `sb is not None and sb.summary is not None`.
+- [ ] **Step 4: Run the whole suite** → `python3 -m pytest tests -q` PASS, `tests/test_cli.py` unchanged
+- [ ] **Step 5: Commit** `git commit -m "Pipeline: force full depth, run_sandbox_stage helper, payload-safe as_dict"`
 
 ### Task 1: Source policy (Malleus)
 
