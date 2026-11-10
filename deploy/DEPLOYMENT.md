@@ -186,6 +186,8 @@ docker compose -f docker-compose-prod.yml -f docker-compose-sandbox.yml stop san
 
 The prod stack runs a Karton pipeline: MWDB hands every upload to Karton (`karton-system-router`, `karton-classifier`), and the Malleus `malleus-static` service on a second droplet in the same VPC analyses it and sends results back through `karton-mwdb-reporter`, which writes attributes and tags to MWDB. Redis (6379) and S3/silo (9000), which Karton uses as message bus and resource store, are published on this droplet's VPC address only so the worker can reach them.
 
+The depth of analysis is decided from the tags present on the object when the Karton task is spawned (at upload), so feeders must tag at upload; a tag added later has no effect until the object is reanalysed.
+
 ### Configuration files
 
 Done in section 3: `.env` from `.env.example` (including `VPC_BIND_IP`, `REDIS_PASSWORD`, `SILO_ACCESS_KEY`, `SILO_SECRET_KEY`) and `karton.ini` from `deploy/karton.ini.example`. Secrets are injected as karton-core environment overrides (`KARTON_REDIS_PASSWORD`, `KARTON_S3_ACCESS_KEY`, ...) and never written to `karton.ini`. Start the stack (section 5) before continuing.
@@ -217,7 +219,7 @@ Create one account per scanner, named exactly `jetpack-scan`, `wpcloud-scan` and
 
 ### Researchers
 
-Give the researchers' group the capability `reading_all_attributes` (Settings → Groups → the group → Capabilities) so they can read the Malleus attributes.
+Give the researchers' group the capabilities `reading_all_attributes` (to read the Malleus attributes) and `karton_reanalyze` (to resend a sample to Karton with its current tags), under Settings → Groups → the group → Capabilities. Scanner accounts keep `adding_tags` only, and the `karton` user does not need `karton_reanalyze`.
 
 ### Keep `MWDB_SANDBOX_URL` unset
 
@@ -246,7 +248,27 @@ Install and configure the worker following `deploy/worker/README.md` in the Mall
    docker compose -f docker-compose-prod.yml ps
    ```
 
-2. Upload a harmless test file in the web UI, and add the tag `source:researcher` to it.
+2. Upload a harmless test file with the tag `source:researcher` set at upload time (the task payload carries the tags present when the file is created). Either:
+
+   - Through the API, which accepts tags in the upload options (the web upload form does not). With `mwdblib`:
+
+     ```python
+     from mwdblib import MWDB
+     mwdb = MWDB(api_url="https://YOUR_DOMAIN/api/", api_key="YOUR_API_KEY")
+     mwdb.upload_file("test.bin", b"harmless test content", tags=["source:researcher"])
+     ```
+
+     or the equivalent `curl` (`POST /api/file`, multipart with the JSON `options` field):
+
+     ```bash
+     curl -sf -X POST https://YOUR_DOMAIN/api/file \
+       -H "Authorization: Bearer YOUR_API_KEY" \
+       -F "file=@test.bin" \
+       -F 'options={"tags":[{"tag":"source:researcher"}]}'
+     ```
+
+   - Or through the web UI: upload the file, add the tag `source:researcher` on the sample page, then press Reanalyze on the sample's Karton panel. A tag added after upload does nothing until Reanalyze resends the task with the current tags; the button needs the `karton_reanalyze` capability.
+
 3. Watch the reporter:
 
    ```bash
