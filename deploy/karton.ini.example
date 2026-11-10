@@ -1,0 +1,13 @@
+# Copy to ./karton.ini on the droplet (it is mounted read-only into mwdb and
+# every karton-* container). Holds no secrets: the Redis password, S3 keys and
+# the reporter's MWDB API key are injected from .env as KARTON_<SECTION>_<OPTION>
+# environment overrides (see docker-compose-prod.yml).
+[redis]
+host = redis
+
+[s3]
+address = http://silo:9000
+bucket = karton
+
+[mwdb]
+api_url = http://mwdb.:8080/api/
