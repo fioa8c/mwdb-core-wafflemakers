@@ -184,9 +184,20 @@ docker compose -f docker-compose-prod.yml -f docker-compose-sandbox.yml stop san
 
 ## 9. Karton and the worker droplet
 
-The prod stack runs a Karton pipeline: MWDB hands every upload to Karton (`karton-system-router`, `karton-classifier`), and the Malleus `malleus-static` service on a second droplet in the same VPC analyses it and sends results back through `karton-mwdb-reporter`, which writes attributes and tags to MWDB. Redis (6379) and S3/silo (9000), which Karton uses as message bus and resource store, are published on this droplet's VPC address only so the worker can reach them.
+The prod stack runs a Karton pipeline: MWDB hands every upload to Karton (`karton-system-router`, `karton-classifier`), and two Malleus consumers on a second droplet in the same VPC analyse it: `malleus-static` (rules, deobfuscation, LLM read) and `malleus-detonate` (runs PHP that needs runtime evidence in KadathSandbox). Results go back through `karton-mwdb-reporter`, which writes attributes and tags to MWDB. Redis (6379) and S3/silo (9000), which Karton uses as message bus and resource store, are published on this droplet's VPC address only so the worker can reach them.
 
 The depth of analysis is decided from the tags present on the object when the Karton task is spawned (at upload), so feeders must tag at upload; a tag added later has no effect until the object is reanalysed.
+
+### Before deploying
+
+Take a database backup first (the manual backup in section 10), because `mwdb-core configure` swallows upgrade failures: a migration that fails during the deploy does not stop the deploy, so the only way back is the dump.
+
+```bash
+docker compose -f docker-compose-prod.yml exec -T postgres \
+  pg_dump -U mwdb -d mwdb --format=custom > mwdb_pre_detonate_$(date +%Y%m%d).dump
+```
+
+Keep the dump off the droplet. After the deploy (step 1 of "Rollout order"), check `docker compose -f docker-compose-prod.yml logs mwdb | grep -i -e malleus -e alembic -e error` for failures; the restore is in section 10.
 
 ### Configuration files
 
@@ -206,7 +217,7 @@ docker compose -f docker-compose-prod.yml up -d karton-mwdb-reporter
 
 The reporter authenticates with this key only. It has no admin credentials and does not read `mwdb-vars.env`.
 
-Attribute rights (read and set on the Malleus attributes) are not capabilities. The `malleus` plugin creates the attribute definitions and the `AttributePermission` rows at every MWDB start (`mwdb-core configure`) for the groups named in `MWDB_MALLEUS_SET_GROUPS` (default `karton`) and `MWDB_MALLEUS_READ_GROUPS` (default `jetpack-scan,wpcloud-scan,elderward`); groups that do not exist yet are skipped. Those two variables are the source of truth: the flags are rewritten on every start, and removing a group from them does not revoke its rows (delete them under Settings → Attributes → the key → Permissions). `MWDB_MALLEUS_REPORTER_LOGINS` (default `karton`) names the reporter login; a `source:` tag it creates is removed. Create all accounts in this section first, then restart MWDB once:
+Attribute rights (read and set on the Malleus attributes) are not capabilities. The `malleus` plugin creates the attribute definitions and the `AttributePermission` rows at every MWDB start (`mwdb-core configure`) for the groups named in `MWDB_MALLEUS_SET_GROUPS` (default `karton`) and `MWDB_MALLEUS_READ_GROUPS` (default `jetpack-scan,wpcloud-scan,elderward`); groups that do not exist yet are skipped. Those two variables are the source of truth: the flags are rewritten on every start, and removing a group from them does not revoke its rows (delete them under Settings → Attributes → the key → Permissions). `MWDB_MALLEUS_REPORTER_LOGINS` (default `karton`) names the reporter login; a `source:` tag it creates is removed, and when it creates a new analysis's `malleus_analysis` value or `verdict:*` tag the plugin removes the previous run's `malleus_*` / `sandbox_*` values and `verdict:*` tags, so a reanalysis replaces the verdict instead of adding a second one. The reporter's login must therefore be listed there. Create all accounts in this section first, then restart MWDB once:
 
 ```bash
 docker compose -f docker-compose-prod.yml restart mwdb
@@ -227,24 +238,114 @@ Give the researchers' group the capabilities `reading_all_attributes` (to read t
 
 Do not set `MWDB_SANDBOX_URL` on `mwdb` in `.env`, `mwdb-vars.env` or the compose file. When it is set, the synchronous PHP normalize hook runs on every upload and adds a `normalized-php` child per sample next to the layers the pipeline produces. Batch normalization stays available through the CLI in section 8.
 
-### Firewall
-
-Redis (6379) and S3/silo (9000) must be reachable from the worker droplet's VPC address only, never from the public internet. Compose already publishes both on `VPC_BIND_IP` only. Add the matching rules at the firewall (WORKER_VPC_IP is the worker's private address):
-
-```bash
-ufw allow from WORKER_VPC_IP to any port 6379 proto tcp
-ufw allow from WORKER_VPC_IP to any port 9000 proto tcp
-```
-
-Docker-published ports bypass `ufw`'s rules, so also add the same restriction to the DigitalOcean cloud firewall: inbound TCP 6379 and 9000 from the worker droplet only, and nothing from `Anywhere`. Verify from a machine outside the VPC that `nc -vz YOUR_DROPLET_IP 6379` and `nc -vz YOUR_DROPLET_IP 9000` fail.
-
 ### Worker droplet
 
-Install and configure the worker following `deploy/worker/README.md` in the Malleus repository. Its `karton.ini` points at `VPC_BIND_IP`: Redis `host` with the `REDIS_PASSWORD`, S3 `address = http://VPC_BIND_IP:9000` with `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, bucket `karton`.
+The account that owns the droplet is the operator's decision. Put it in the same region and VPC as the MWDB droplet, so Redis and S3 stay on private addresses. Find both with `doctl` (or the control panel):
+
+```bash
+doctl compute droplet get <mwdb-droplet-id> --format VPCUUID,Region,PrivateIPv4
+```
+
+```bash
+doctl compute droplet create malleus-worker \
+  --size c-8 \
+  --image ubuntu-24-04-x64 \
+  --region <MWDB droplet's region> \
+  --vpc-uuid <MWDB droplet's VPC UUID> \
+  --tag-name malleus-worker \
+  --ssh-keys <key ids or fingerprints>
+```
+
+`c-8` is the CPU-Optimized plan with 8 vCPUs and 16 GB RAM, $168/month. It runs the LLM (Ollama, CPU only), the `cx` deobfuscation container and Kadath's containers side by side, so do not shrink it without measuring. The `malleus-worker` tag is what both firewalls below match on.
+
+### Firewalls
+
+Redis (6379) and S3/silo (9000) must be reachable from the worker droplet only, never from the public internet. Compose already publishes both on `VPC_BIND_IP` only. Docker-published ports bypass `ufw`'s rules, so the DigitalOcean cloud firewall is the control that counts and `ufw` is the second layer.
+
+1. **Worker cloud firewall** `malleus-worker-fw`, applied to the tag `malleus-worker`: inbound TCP 22 from the operator's address only and nothing else; outbound everything. A DigitalOcean cloud firewall with no outbound rules permits no outbound traffic, so the outbound allow-all is written out per protocol (it also carries the worker's Redis/S3 traffic to the MWDB droplet and Kadath's egress through its gateway):
+
+   ```bash
+   doctl compute firewall create --name malleus-worker-fw \
+     --tag-names malleus-worker \
+     --inbound-rules "protocol:tcp,ports:22,address:<operator address>/32" \
+     --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0 protocol:udp,ports:all,address:0.0.0.0/0 protocol:icmp,address:0.0.0.0/0"
+   ```
+
+   The rules cover IPv4 only; leave IPv6 off on the worker droplet.
+
+2. **MWDB droplet cloud firewall.** Add inbound TCP 6379 and TCP 9000 with the source tag `malleus-worker`, and nothing from `Anywhere`. Use the ID of the firewall the MWDB droplet already has (`doctl compute firewall list`):
+
+   ```bash
+   doctl compute firewall add-rules <mwdb-firewall-id> \
+     --inbound-rules "protocol:tcp,ports:6379,tag:malleus-worker protocol:tcp,ports:9000,tag:malleus-worker"
+   ```
+
+3. **`ufw` on the MWDB droplet**, with `WORKER_VPC_IP` the worker's private address (`doctl compute droplet get <worker-id> --format PrivateIPv4`):
+
+   ```bash
+   ufw allow from WORKER_VPC_IP to any port 6379 proto tcp
+   ufw allow from WORKER_VPC_IP to any port 9000 proto tcp
+   ```
+
+4. **Verify both directions.** From a machine outside the VPC, both must fail:
+
+   ```bash
+   nc -vz YOUR_DROPLET_IP 6379
+   nc -vz YOUR_DROPLET_IP 9000
+   ```
+
+   From the worker, both must succeed:
+
+   ```bash
+   nc -vz VPC_BIND_IP 6379
+   nc -vz VPC_BIND_IP 9000
+   ```
+
+   `VPC_BIND_IP` is the MWDB droplet's private address (the value in its `.env`).
+
+### Worker install
+
+Install and configure the worker following `deploy/worker/README.md` in the Malleus repository: the host packages, users and directories, config and units (Part 1), and its Kadath section (Docker CE, the pinned KadathSandbox checkout, `make up`, `make selftest`, the manual offering). Its `karton.ini` points at `VPC_BIND_IP`: Redis `host` with the `REDIS_PASSWORD`, S3 `address = http://VPC_BIND_IP:9000` with `SILO_ACCESS_KEY` / `SILO_SECRET_KEY`, bucket `karton`. Secrets go in `/etc/malleus/env`, never into `karton.ini`.
+
+### Rollout order
+
+Follow this order; steps 5 and 6 repeat the worker README's rollout order, and detonate must be enabled before static is allowed to hand it work.
+
+1. Fork deploy on the MWDB droplet: `git pull`, `docker compose -f docker-compose-prod.yml up -d --build` (section 11, Updates). `configure` creates the new attribute definitions (`malleus_analysis`, `sandbox_*`) at start; check the logs as described under "Before deploying".
+2. On the worker, start `malleus-static` with `sandbox_mode = never` in `/etc/karton/karton.ini`.
+3. In `/opt/KadathSandbox`: `make up`, `make selftest` and the manual offering (worker README, Kadath step 4). Then run the containment check below, while no service is using Kadath.
+4. `systemd-analyze verify /etc/systemd/system/malleus-*.service`.
+5. Enable `malleus-detonate` (`systemctl enable --now malleus-detonate`) and check `systemctl status malleus-detonate`.
+6. Only once the containment check has passed: set `sandbox_mode = auto` in `/etc/karton/karton.ini` and `systemctl restart malleus-static`.
+7. Verify the pipeline (below).
+
+To roll back, set `sandbox_mode = never` and restart `malleus-static` first, then stop `malleus-detonate`.
+
+### Containment check before real samples
+
+Run this once, as part of step 3: after the manual offering succeeds and before `malleus-detonate` is enabled in step 5, so that no real sample goes through Kadath first and the worker's Kadath is not in use (the worker README reserves it for the service once that runs). The probe is Malleus `tests/fixtures/kadath/probe.php`, a benign file that tries `fsockopen(MWDB_VPC_IP, 6379)`, `fsockopen(MWDB_VPC_IP, 9000)` and `file_get_contents("http://169.254.169.254/metadata/v1/id")` (the probe throws a `RuntimeException` instead of probing if `MWDB_VPC_IP` was not replaced). On the worker:
+
+```bash
+cp /opt/malleus/tests/fixtures/kadath/probe.php /tmp/probe.php
+sed -i 's/MWDB_VPC_IP/<MWDB droplet VPC address>/' /tmp/probe.php
+cd /opt/KadathSandbox
+sudo -u malleus -H python3 bin/kadath offer --json --stub-missing --adopt-wp /tmp/probe.php
+rm /tmp/probe.php
+```
+
+The `sed` also rewrites the probe's comment lines and its guard message, which is harmless.
+
+Kadath records only the HTTP status of the trigger and `offer --json` prints only the path of `summary.json`, so the probe's own output is never shown. Read the result from that `summary.json` alone. The check has passed only if all three hold:
+
+- `run.fatals` does not contain `PLACEHOLDER NOT REPLACED` (if it does, the substitution was skipped and nothing was tested).
+- `network.dropped` lists the MWDB VPC address on port 6379 and on port 9000.
+- `network.flows` has no entry for the MWDB VPC address or for `169.254.169.254`.
+
+If `network.dropped` does not list both VPC ports, the check has NOT passed, even if no flow shows up: investigate before any real sample runs (check `GATEWAY_BLOCKED_DESTS` in Kadath's `.env` and the default in `gateway/entrypoint.sh`, which must cover the VPC range and the metadata address). Do not enable `sandbox_mode = auto` until it passes. Never commit the real address or the substituted copy.
 
 ### Verify the pipeline
 
-1. Check that every Karton service is up:
+1. Check that every Karton service is up here, and on the worker that `systemctl status malleus-static malleus-detonate` shows both active:
 
    ```bash
    docker compose -f docker-compose-prod.yml ps
@@ -279,6 +380,25 @@ Install and configure the worker following `deploy/worker/README.md` in the Mall
    ```
 
 4. After a minute or two, the sample should carry a `verdict:*` tag and the Malleus attributes, and it must have children (Relations tab): at least one `llm-read` blob named `<sha256 prefix>-llm.json` (the LLM report) and the `deobfuscated-php` blobs, one per peeled layer (`<sha256 prefix>-c.php`, `-co.php`, ...). The reporter log must show no `403` / `Forbidden`. A sample with its verdict but without children means the `karton` account lacks `karton_assign` (step 2 of "The `karton` reporter account"). If nothing arrives at all, check the worker's logs and that the worker can reach `VPC_BIND_IP:6379` and `:9000`.
+
+5. Run the smoke script against prod from a checkout of this repository on a machine with `mwdblib` installed, using a researcher account's API key (create it under Settings → Users → the user → Manage API keys). The account needs `adding_files`, `adding_tags`, `reading_all_attributes` and `karton_reanalyze`; a scanner login does not work, because its `source:researcher` tag is stripped. The script uploads `weak.php` tagged `source:researcher` (full depth), so the sample lands in prod; `--salt` gives it a hash no earlier run used:
+
+   ```bash
+   export MWDB_URL=https://YOUR_DOMAIN/api
+   export MWDB_API_KEY=YOUR_RESEARCHER_API_KEY
+   python3 dev/malleus-smoke.py --expect-sandbox --reanalyze --timeout 1200 --salt "$(date +%F)"
+   ```
+
+   `--expect-sandbox` waits for the detonation: a `*-kadath-summary.json` child of type `sandbox-report`, a `sandbox_level` attribute and a sandbox stage with status `ok` in `malleus_stages`. `--reanalyze` resends the sample and checks that exactly one verdict tag and one value of each single-valued `malleus_*` attribute remain. It only passes when the prod reporter's login is listed in `MWDB_MALLEUS_REPORTER_LOGINS` (`karton` by default, so leave the reporter logging in with its `karton` API key); under any other login the cleanup does not run and old and new values pile up. If the account cannot see the reporter's children, add `--skip-children`.
+
+6. A scanner upload: send a PHP file with `context` and the `source:<scanner>` tag in the upload options, as a scanner account would (auto depth). Which fixture gives which model read is not fixed, so judge each upload by its outcome: a weak hit that the static stages did not settle, where the model read is green or amber, detonates (the object gets a `sandbox-report` child and `sandbox_*` attributes); one where the model read is red does not (its verdict is settled and there is no `sandbox-report`). Full depth (`source:researcher`) always detonates, which is what step 5 covers.
+
+### Recovery
+
+- `malleus-detonate` (or `malleus-static`) is not running or keeps restarting: both units run a preflight (`malleus-preflight`) before starting and systemd retries a failing one with a growing delay (30 s up to 600 s). There is no start limit (`StartLimitIntervalSec=0`), so the unit is never left permanently failed and recovers on its own once the cause is fixed. Read `journalctl -u malleus-detonate` for the preflight's problem lines (a missing binary or checkout, Docker or Compose not usable, Kadath not set up) and fix the cause. `systemctl restart malleus-detonate` retries immediately instead of waiting out the delay.
+- An object has no verdict after a hard kill (SIGKILL or the out-of-memory killer, which the consumers' crash handler cannot catch): open the sample in MWDB and press Reanalyze on the Karton panel (needs `karton_reanalyze`). The reanalysis replaces whatever the interrupted run left behind.
+- Do not restart a crashed Malleus task from a Karton dashboard to recover it: that re-posts the same `malleus_analysis` value, so the reanalysis cleanup does not fire and the old run's attributes and tags stay. Use Reanalyze on the sample page instead (production deploys no dashboard).
+- A sample ended `undetermined` with a reason starting `sandbox: error` (Kadath busy or timed out) or `analysis crashed:`: the same, press Reanalyze after fixing the cause in the worker's journal.
 
 ## 10. PostgreSQL backups
 

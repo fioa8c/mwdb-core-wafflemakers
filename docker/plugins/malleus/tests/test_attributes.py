@@ -116,6 +116,12 @@ def test_attribute_keys_exact_and_described():
         "context",
         "layer_variant",
         "layer_unlocked",
+        "malleus_analysis",
+        "sandbox_level",
+        "sandbox_coverage",
+        "sandbox_network",
+        "sandbox_files_written",
+        "sandbox_dangerous_calls",
     )
     assert set(attributes.DESCRIPTIONS) == set(attributes.ATTRIBUTE_KEYS)
     assert all(attributes.DESCRIPTIONS.values())
@@ -139,10 +145,52 @@ def test_ensure_attribute_definitions_is_idempotent(session):
 
 def test_ensure_attribute_definitions_adds_only_missing(session):
     session.rows[FakeAttributeDefinition].append(
-        FakeAttributeDefinition(key="malleus_verdict")
+        FakeAttributeDefinition(
+            key="malleus_verdict",
+            description=attributes.DESCRIPTIONS["malleus_verdict"],
+        )
     )
     attributes.ensure_attribute_definitions()
     assert len(session.added) == len(attributes.ATTRIBUTE_KEYS) - 1
+    assert session.commits == 1
+
+
+def test_pipeline_keys_exclude_scanner_and_layer_keys():
+    assert attributes.ANALYSIS_KEY == "malleus_analysis"
+    assert set(attributes.ATTRIBUTE_KEYS) - set(attributes.PIPELINE_KEYS) == {
+        "context",
+        "layer_variant",
+        "layer_unlocked",
+    }
+    assert attributes.ANALYSIS_KEY in attributes.PIPELINE_KEYS
+    assert "sandbox_level" in attributes.PIPELINE_KEYS
+
+
+def test_corrected_descriptions():
+    d = attributes.DESCRIPTIONS
+    assert d["malleus_depth"] == "Analysis depth: none, auto or full"
+    assert d["layer_unlocked"] == "Rules this layer matched that the sample did not"
+    assert d["sandbox_level"] == "Kadath sandbox evidence level (red, amber, green)"
+
+
+def test_existing_definition_description_updated(session):
+    stale = FakeAttributeDefinition(key="malleus_depth", description="old text")
+    session.rows[FakeAttributeDefinition].append(stale)
+    attributes.ensure_attribute_definitions()
+    assert stale.description == "Analysis depth: none, auto or full"
+    assert len(session.added) == len(attributes.ATTRIBUTE_KEYS) - 1
+
+
+def test_description_update_alone_commits(session):
+    attributes.ensure_attribute_definitions()
+    assert session.commits == 1
+    session.rows[FakeAttributeDefinition][0].description = "drifted"
+    attributes.ensure_attribute_definitions()
+    assert session.commits == 2
+    assert (
+        session.rows[FakeAttributeDefinition][0].description
+        == attributes.DESCRIPTIONS["malleus_verdict"]
+    )
 
 
 def test_set_group_can_read_and_set_everything(session):
