@@ -23,6 +23,7 @@ from botocore.credentials import (
 )
 
 from .config import app_config
+from .filetype import refine_file_type
 from .ssdeep import SsdeepHash
 from .tlsh import calc_tlsh as calc_tlsh
 
@@ -94,11 +95,15 @@ def calc_magic(stream) -> str:
     try:
         fd_path = get_fd_path(stream)
         if fd_path:
-            return magic.maybe_decode(magic.magic_file(magic_cookie, fd_path))
+            verdict = magic.maybe_decode(magic.magic_file(magic_cookie, fd_path))
+            return refine_file_type(stream, verdict)
         else:
             # Handle BytesIO in-memory streams
             stream.seek(0, os.SEEK_SET)
-            return magic.maybe_decode(magic.magic_buffer(magic_cookie, stream.read()))
+            verdict = magic.maybe_decode(
+                magic.magic_buffer(magic_cookie, stream.read())
+            )
+            return refine_file_type(stream, verdict)
     except magic.MagicException:
         # If libmagic fails, we fallback to 'data'
         return "data"

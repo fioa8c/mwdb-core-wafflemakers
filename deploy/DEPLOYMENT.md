@@ -358,6 +358,22 @@ docker compose -f docker-compose-prod.yml up -d --build
 
 Changes to `karton.ini` or `.env` need the affected services recreated (`up -d` does this for `.env`; `restart` the Karton services after editing `karton.ini`). Update the worker droplet separately (see its README).
 
+### Recomputing file types
+
+`file_type` is computed once, at upload, by libmagic plus the PHP refinement
+in `mwdb/core/filetype.py` (a PHP open tag anywhere in the file makes it
+`PHP script, ...`). Stored values do not change on their own, so re-run this
+after deploying an image with a newer libmagic, or after changing that
+refinement:
+
+```bash
+docker compose -f docker-compose-prod.yml run --rm -e MWDB_ENABLE_HOOKS=0 mwdb mwdb-core recompute-file-types
+```
+
+Add `--dry-run` first to list what would change without writing anything, and
+`--limit N` to examine only the first N files. It reads every stored file, so
+expect it to take a while on a large instance; it is safe to re-run.
+
 ### View logs
 
 ```bash
@@ -382,6 +398,59 @@ du -sh /var/lib/docker/volumes/                     # Volume sizes
 docker compose -f docker-compose-prod.yml exec postgres \
   psql -U mwdb -d mwdb -c "SELECT pg_size_pretty(pg_database_size('mwdb'));"
 ```
+
+## Threat library sync rollout
+
+1. Create a deploy key with write access to `Automattic/jetpack-threat-library`
+   on github.a8c.com and pin the host key. The sidecar runs as `nobody`
+   (uid 65534), so the key must be owned by that uid:
+
+   ```bash
+   mkdir -p ./secrets
+   # place the private key at ./secrets/threatlib_deploy_key, then:
+   sudo chown 65534:65534 ./secrets/threatlib_deploy_key
+   sudo chmod 600 ./secrets/threatlib_deploy_key
+   ssh-keyscan github.a8c.com > ./secrets/threatlib_known_hosts
+   ```
+
+   Both files stay out of git. With `MWDB_THREATLIB_KNOWN_HOSTS` set (the
+   prod compose does) ssh refuses any host key not in that file.
+2. `docker compose -f docker-compose-prod.yml up -d --build threatlib-sync`
+   with `MWDB_THREATLIB_PUSH=0` (the default). The sync acts as the admin
+   user (`MWDB_THREATLIB_USER` overrides it; the container exits with code 2
+   if the user does not exist). The first run ingests every repo path under
+   the four owned dirs: files already in MWDB from the April import are
+   de-duplicated by sha256 and re-linked under their exact repo paths, new
+   files are uploaded, and the export is written into the `threatlib-repo`
+   volume without pushing. It does not read the April import's comments; the
+   READMEs come from the repo's `README.md` files.
+
+   **Sharing:** every ingested sample, including April-imported ones
+   re-matched by sha256, is shared with `MWDB_THREATLIB_SHARE_WITH`
+   (default `public`, i.e. every logged-in researcher). Set it to an empty
+   string to share with nobody (admin-only) before the first run if that is
+   not wanted.
+3. Review the diff. With `PUSH=0` the sync commits locally, so compare the
+   local commit with the remote:
+
+   ```bash
+   docker compose -f docker-compose-prod.yml exec threatlib-sync \
+     git -C /data/repo diff --stat origin/trunk HEAD
+   ```
+
+   Expected: only `.mwdb-threatlib.json` added. Investigate anything else
+   before continuing. Also check the logs for `preserved` warnings: those
+   paths could not be ingested and are kept in the repo as they are.
+
+   While `PUSH=0` the remote has no manifest, so every run is a first run:
+   anything unlinked in MWDB in the meantime is re-imported from the repo on
+   the next run. Keep this window short.
+4. `MWDB_THREATLIB_PUSH=1 docker compose -f docker-compose-prod.yml up -d threatlib-sync`.
+   The first pushed commit adds only the manifest.
+5. Announce that MWDB is canonical for `threats/`, `for-later-review/`,
+   `webshells/`, `escalated_issues_samples/`. Hand-made PRs still merge safely
+   (ingest runs first); after a quiet period mark those dirs as generated in
+   the repo README.
 
 ## Security notes
 
