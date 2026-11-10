@@ -174,3 +174,128 @@ def test_reporter_logins_come_from_the_class_attribute(reporter, monkeypatch):
     obj = MagicMock()
     hooks.MalleusHookHandler().on_created_tag(obj, _tag("source:x"))
     assert obj.mock_calls == []
+
+
+@pytest.fixture
+def env_reporter(reporter):
+    return reporter
+
+
+def test_hook_verdict_tag_by_reporter_clears(env_reporter, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        hooks.reanalysis,
+        "clear_previous_verdict",
+        lambda o, t: calls.append((o, t)) or ["verdict:old", "wm:needs-review"],
+    )
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("verdict:malicious"))
+    assert calls == [(obj, "verdict:malicious")]
+    env_reporter.session.commit.assert_called_once_with()
+    env_reporter.session.rollback.assert_not_called()
+
+
+def test_hook_verdict_tag_clears_real_tags(env_reporter):
+    obj = MagicMock(
+        tags=[_tag("verdict:old"), _tag("verdict:new"), _tag("wm:needs-review")]
+    )
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("verdict:new"))
+    removed = sorted(c.args[0] for c in obj.remove_tag.call_args_list)
+    assert removed == ["verdict:old", "wm:needs-review"]
+    env_reporter.session.commit.assert_called_once_with()
+
+
+def test_hook_verdict_tag_by_researcher_does_nothing(env, monkeypatch):
+    monkeypatch.setattr(
+        hooks, "g", SimpleNamespace(auth_user=SimpleNamespace(login="alice"))
+    )
+    obj = MagicMock(tags=[_tag("verdict:old"), _tag("verdict:new")])
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("verdict:new"))
+    obj.remove_tag.assert_not_called()
+    env.session.commit.assert_not_called()
+
+
+def test_hook_non_verdict_tag_by_reporter_does_not_clear(env_reporter, monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        hooks.reanalysis, "clear_previous_verdict", lambda o, t: called.append(t)
+    )
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("yara:rule"))
+    assert called == []
+    env_reporter.session.commit.assert_not_called()
+
+
+def test_hook_stripped_source_tag_skips_verdict_cleanup(env_reporter, monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        hooks.reanalysis, "clear_previous_verdict", lambda o, t: called.append(t)
+    )
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("source:x"))
+    assert called == []
+    obj.remove_tag.assert_called_once_with("source:x", commit=False)
+
+
+def test_hook_analysis_attr_by_reporter_clears(env_reporter, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        hooks.reanalysis,
+        "clear_previous_analysis",
+        lambda o, a: calls.append((o, a)) or 5,
+    )
+    obj = MagicMock()
+    anchor = _attr("malleus_analysis", "uid-1")
+    hooks.MalleusHookHandler().on_created_attribute(obj, anchor)
+    assert calls == [(obj, anchor)]
+
+
+def test_hook_analysis_attr_by_scanner_does_nothing(env, monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        hooks.reanalysis, "clear_previous_analysis", lambda o, a: called.append(a)
+    )
+    hooks.MalleusHookHandler().on_created_attribute(
+        MagicMock(), _attr("malleus_analysis", "uid-1")
+    )
+    assert called == []
+
+
+def test_hook_analysis_attr_without_auth_user_does_nothing(env, monkeypatch):
+    monkeypatch.setattr(hooks, "g", SimpleNamespace())
+    called = []
+    monkeypatch.setattr(
+        hooks.reanalysis, "clear_previous_analysis", lambda o, a: called.append(a)
+    )
+    hooks.MalleusHookHandler().on_created_attribute(
+        MagicMock(), _attr("malleus_analysis", "uid-1")
+    )
+    assert called == []
+
+
+def test_hook_other_attribute_by_reporter_does_nothing(env_reporter, monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        hooks.reanalysis, "clear_previous_analysis", lambda o, a: called.append(a)
+    )
+    hooks.MalleusHookHandler().on_created_attribute(
+        MagicMock(), _attr("malleus_reasons", "x")
+    )
+    assert called == []
+
+
+def test_hook_cleanup_failure_is_logged_not_raised(env_reporter, monkeypatch, caplog):
+    def boom(*args):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(hooks.reanalysis, "clear_previous_analysis", boom)
+    monkeypatch.setattr(hooks.reanalysis, "clear_previous_verdict", boom)
+    obj = MagicMock()
+    with caplog.at_level(logging.ERROR, logger="mwdb.plugin.malleus"):
+        hooks.MalleusHookHandler().on_created_attribute(
+            obj, _attr("malleus_analysis", "uid-1")
+        )
+        hooks.MalleusHookHandler().on_created_tag(obj, _tag("verdict:malicious"))
+    assert env_reporter.session.rollback.call_count == 2
+    assert [r.levelno for r in caplog.records] == [logging.ERROR, logging.ERROR]
+    assert "db down" in caplog.text
