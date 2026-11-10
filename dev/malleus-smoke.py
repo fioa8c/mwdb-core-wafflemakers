@@ -4,7 +4,7 @@
 Uploads tests/fixtures/malleus/weak.php tagged source:researcher, then waits for
 malleus-static (via Karton and karton-mwdb-reporter) to set the malleus_verdict attribute.
 
-Env: MWDB_URL (default http://127.0.0.1/api), MWDB_API_KEY or MWDB_ADMIN_LOGIN/MWDB_ADMIN_PASSWORD.
+Env: MWDB_URL (default http://127.0.0.1:8081/api, where compose.with-malleus-dev.yml serves the SPA/API), MWDB_API_KEY or MWDB_ADMIN_LOGIN/MWDB_ADMIN_PASSWORD.
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ CONTEXT = {"scanner": "smoke", "site_id": 123}
 
 
 def connect():
-    mwdb = MWDB(api_url=os.environ.get("MWDB_URL", "http://127.0.0.1/api"))
+    mwdb = MWDB(api_url=os.environ.get("MWDB_URL", "http://127.0.0.1:8081/api"))
     if os.environ.get("MWDB_API_KEY"):
         mwdb.api.set_api_key(os.environ["MWDB_API_KEY"])
     else:
@@ -45,8 +45,8 @@ def check_context(obj):
     stored = obj.attributes.get("context") or []
     ctx = stored[0] if stored else None
     ok = isinstance(ctx, dict) and "site_id" not in ctx and ctx.get("scanner") == "smoke"
-    ok = ok and "wm:context-stripped" in [t.tag for t in obj.tags]
-    print("context stored: %r, tags: %s -> %s" % (ctx, [t.tag for t in obj.tags], "ok" if ok else "FAILED"))
+    ok = ok and "wm:context-stripped" in obj.tags
+    print("context stored: %r, tags: %s -> %s" % (ctx, list(obj.tags), "ok" if ok else "FAILED"))
     return ok
 
 
@@ -75,7 +75,7 @@ def main():
             failed = True
             continue
         print("malleus_verdict: %s" % attrs["malleus_verdict"][0])
-        print("tags: %s" % [t.tag for t in obj.tags])
+        print("tags: %s" % list(obj.tags))
         for child in obj.children:
             print("child: %s %s" % (child.type, child.name))
         if attributes and not check_context(obj):
