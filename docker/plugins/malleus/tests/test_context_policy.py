@@ -55,3 +55,14 @@ def test_source_tag_rules():
     # non-source tags are always allowed
     assert allowed("wm:context-stripped", "jetpack-scan")
     assert allowed("malware:webshell", "elderward")
+
+
+def test_reporter_login_may_not_create_source_tags():
+    allowed = context_policy.source_tag_allowed
+    reporters = ("karton",)
+    assert not allowed("source:researcher", "karton", reporters)
+    assert not allowed("source:jetpack-scan", "karton", reporters)
+    assert allowed("script:php", "karton", reporters)
+    assert allowed("verdict:malicious", "karton", reporters)
+    # without the reporter list the login is treated like a researcher
+    assert allowed("source:researcher", "karton")

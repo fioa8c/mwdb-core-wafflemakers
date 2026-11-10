@@ -13,6 +13,10 @@ SOURCE_STRIPPED_TAG = "wm:source-stripped"
 
 
 class MalleusHookHandler(HookHandler):
+    # Set by `entrypoint` from MWDB_MALLEUS_REPORTER_LOGINS; MWDB instantiates
+    # hook handlers without arguments, so this is a class attribute.
+    reporter_logins = ("karton",)
+
     def on_created_attribute(self, object, attribute):
         if attribute.key != "context":
             return
@@ -36,12 +40,12 @@ class MalleusHookHandler(HookHandler):
         if login is None:
             return
         try:
-            if source_tag_allowed(tag.tag, login):
+            if source_tag_allowed(tag.tag, login, self.reporter_logins):
                 return
             object.remove_tag(tag.tag, commit=False)
             object.add_tag(SOURCE_STRIPPED_TAG, commit=False)
             db.session.commit()
-            logger.info("malleus: removed foreign source tag set by %s", login)
+            logger.info("malleus: removed source tag set by %s", login)
         except Exception:
             logger.exception("malleus: failed to strip source tag")
             db.session.rollback()

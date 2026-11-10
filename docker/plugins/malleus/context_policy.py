@@ -1,6 +1,6 @@
 """Pure rules for the `context` attribute and scanner `source:` tags."""
 
-from typing import Any, List, Tuple
+from typing import Any, Iterable, List, Tuple
 
 ALLOWED_CONTEXT_KEYS = ("scanner", "scanner_version", "rules", "path", "engine")
 SCANNER_SOURCES = ("jetpack-scan", "wpcloud-scan", "elderward")
@@ -19,10 +19,21 @@ def filter_context(value: Any) -> Tuple[Any, List[str]]:
     return kept, stripped
 
 
-def source_tag_allowed(tag: str, login: str) -> bool:
-    """A scanner account may only apply `source:<its own login>`."""
+def source_tag_allowed(
+    tag: str, login: str, reporter_logins: Iterable[str] = ()
+) -> bool:
+    """A scanner account may only apply `source:<its own login>`; a reporter
+    account may never create a `source:` tag.
+
+    The reporter replays the tags of the Karton payload, which was built at
+    upload before the scanner-side strip ran, so a `source:` tag it creates is
+    always a forged one coming back. Replaying a tag that is still present
+    creates nothing, so legitimate tags are unaffected.
+    """
     if not tag.startswith("source:"):
         return True
+    if login in reporter_logins:
+        return False
     if login not in SCANNER_SOURCES:
         return True
     return tag == f"source:{login}"

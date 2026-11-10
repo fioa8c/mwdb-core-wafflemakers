@@ -127,7 +127,9 @@ def test_hook_allows_researcher_source_tag(env, monkeypatch):
     assert obj.mock_calls == []
 
 
-@pytest.mark.parametrize("g_value", [SimpleNamespace(), SimpleNamespace(auth_user=None)])
+@pytest.mark.parametrize(
+    "g_value", [SimpleNamespace(), SimpleNamespace(auth_user=None)]
+)
 def test_hook_without_auth_user_does_nothing(env, monkeypatch, g_value):
     monkeypatch.setattr(hooks, "g", g_value)
     obj = MagicMock()
@@ -141,3 +143,34 @@ def test_tag_hook_swallows_errors_and_rolls_back(env):
     obj.remove_tag.side_effect = RuntimeError("db down")
     hooks.MalleusHookHandler().on_created_tag(obj, _tag("source:wpcloud-scan"))
     env.session.rollback.assert_called_once_with()
+
+
+@pytest.fixture
+def reporter(env, monkeypatch):
+    monkeypatch.setattr(
+        hooks, "g", SimpleNamespace(auth_user=SimpleNamespace(login="karton"))
+    )
+    monkeypatch.setattr(hooks.MalleusHookHandler, "reporter_logins", ("karton",))
+    return env
+
+
+def test_hook_removes_source_tag_created_by_reporter(reporter):
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("source:x"))
+    obj.remove_tag.assert_called_once_with("source:x", commit=False)
+    obj.add_tag.assert_called_once_with("wm:source-stripped", commit=False)
+    reporter.session.commit.assert_called_once_with()
+
+
+def test_hook_keeps_other_tags_created_by_reporter(reporter):
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("script:php"))
+    assert obj.mock_calls == []
+    reporter.session.commit.assert_not_called()
+
+
+def test_reporter_logins_come_from_the_class_attribute(reporter, monkeypatch):
+    monkeypatch.setattr(hooks.MalleusHookHandler, "reporter_logins", ("other",))
+    obj = MagicMock()
+    hooks.MalleusHookHandler().on_created_tag(obj, _tag("source:x"))
+    assert obj.mock_calls == []
